@@ -1,0 +1,22 @@
+[phases.setup]
+nixPkgs = [
+  "nodejs",
+  "python3",
+  "gcc",
+  "ffmpeg"
+]
+
+[phases.install]
+cmds = [
+  "npm install",
+  "python3 -m pip install --upgrade pip --break-system-packages",
+  "python3 -m pip install -r requirements.txt --break-system-packages"
+]
+
+[phases.build]
+cmds = [
+  "npm run build"
+]
+
+[start]
+cmd = "npm run start"

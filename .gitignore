@@ -1,0 +1,11 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+video_downloader_temp2/node_modules/
+video_downloader_temp2/.next/
+video_downloader_temp2/out/
