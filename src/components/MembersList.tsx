@@ -384,7 +384,7 @@ export default function MembersList({ adminUserId }: MembersListProps) {
 
                     {member.created_at && (
                       <p className="text-[10px] text-slate-400 mt-1 flex items-center gap-1 justify-end">
-                        <span>تاريخ التسجيل: {new Date(member.created_at).toLocaleDateString("ar-EG")}</span>
+                        <span>تاريخ التسجيل: {new Date(member.created_at).toLocaleDateString("ar-EG-u-nu-latn")}</span>
                         <Clock className="w-3 h-3 text-slate-400" />
                       </p>
                     )}

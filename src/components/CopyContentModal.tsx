@@ -1087,7 +1087,7 @@ export function CopyContentModal({ isOpen, onClose, selectedVideos, onSuccess, c
             <div className="bg-amber-50 border border-amber-100 rounded-xl p-3 flex gap-2">
               <ShieldAlert className="w-4.5 h-4.5 text-amber-600 shrink-0 mt-0.5" />
               <div className="text-[10px] text-amber-800 leading-relaxed font-semibold">
-                سيتم جدولة الفيديو الأول في <span className="font-bold underline">{startTime ? new Date(startTime).toLocaleString("ar-EG") : "البداية"}</span>، 
+                سيتم جدولة الفيديو الأول في <span className="font-bold underline">{startTime ? new Date(startTime).toLocaleString("ar-EG-u-nu-latn") : "البداية"}</span>، 
                 ثم سيتم جدولة الفيديوهات التالية بفاصل <span className="font-bold underline">{intervalMinutes} دقيقة</span> بالتتابع تماماً!
               </div>
             </div>

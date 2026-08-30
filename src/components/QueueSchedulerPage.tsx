@@ -422,7 +422,7 @@ export default function QueueSchedulerPage() {
   const formatDate = (dateStr: string) => {
     try {
       const d = new Date(dateStr);
-      return d.toLocaleString("ar-EG", {
+      return d.toLocaleString("ar-EG-u-nu-latn", {
         year: "numeric",
         month: "short",
         day: "numeric",

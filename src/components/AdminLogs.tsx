@@ -67,7 +67,7 @@ export default function AdminLogs({ userId }: { userId: string }) {
         {logs.length === 0 && <p className="text-center p-4">لا توجد سجلات حالياً.</p>}
         {logs.map(log => (
           <div key={log.id} className="border-b border-slate-800 pb-1">
-            <span className="text-slate-500">[{new Date(log.created_at).toLocaleTimeString()}]</span>
+            <span className="text-slate-500">[{new Date(log.created_at).toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", second: "2-digit" })}]</span>
             <span className={`mx-1 ${log.status === 'success' ? 'text-emerald-400' : 'text-rose-400'}`}>
               [{log.status}]
             </span>

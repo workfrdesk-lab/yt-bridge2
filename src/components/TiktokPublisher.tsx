@@ -507,7 +507,7 @@ export default function TiktokPublisher({ activeVideo }: TiktokPublisherProps) {
                               </h4>
                               {item.createdAt && (
                                 <p className="text-[10px] text-slate-400">
-                                  {new Date(item.createdAt).toLocaleDateString("ar-EG", {
+                                  {new Date(item.createdAt).toLocaleDateString("ar-EG-u-nu-latn", {
                                     hour: "2-digit",
                                     minute: "2-digit",
                                   })}

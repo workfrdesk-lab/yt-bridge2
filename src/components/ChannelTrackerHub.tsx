@@ -2403,7 +2403,7 @@ export default function ChannelTrackerHub() {
                 {agentLastRun && (
                   <div>
                     <span>آخر فحص: </span>
-                    <span className="font-mono text-slate-300">{new Date(agentLastRun).toLocaleTimeString("ar-SA")}</span>
+                    <span className="font-mono text-slate-300">{new Date(agentLastRun).toLocaleTimeString("ar-SA-u-nu-latn")}</span>
                   </div>
                 )}
               </div>
@@ -2746,7 +2746,7 @@ export default function ChannelTrackerHub() {
                 {logs.map((log, idx) => (
                   <div key={idx} className="flex items-start gap-3 border-b border-slate-50 pb-2.5 text-right">
                     <span className="text-[9px] text-slate-400 font-mono mt-0.5 shrink-0">
-                      {log.created_at ? new Date(log.created_at).toLocaleTimeString("ar-SA") : ""}
+                      {log.created_at ? new Date(log.created_at).toLocaleTimeString("ar-SA-u-nu-latn") : ""}
                     </span>
                     <div className="flex-1 min-w-0 space-y-0.5">
                       <div className="flex items-center justify-between gap-2">

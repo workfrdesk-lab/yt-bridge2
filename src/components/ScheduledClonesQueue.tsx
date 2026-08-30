@@ -22,6 +22,13 @@ interface ScheduledClone {
     colorBoost?: boolean;
     pitchShift?: boolean;
     channel_name?: string;
+    enableLogo?: boolean;
+    logoUrl?: string;
+    enableCaption?: boolean;
+    caption_template_id?: string | null;
+    caption_text_source?: string;
+    caption_custom_text?: string;
+    [key: string]: any;
   };
   scheduled_time: string;
   status: 'pending' | 'processing' | 'completed' | 'failed' | 'paused';
@@ -338,7 +345,7 @@ export function ScheduledClonesQueue() {
   const formatDate = (dateStr: string) => {
     try {
       const d = new Date(dateStr);
-      return d.toLocaleString("ar-EG", {
+      return d.toLocaleString("ar-EG-u-nu-latn", {
         year: "numeric",
         month: "short",
         day: "numeric",
@@ -527,7 +534,10 @@ export function ScheduledClonesQueue() {
               {item.bypass_settings?.pitchShift && (
                 <span className="text-[9px] font-bold bg-indigo-50 text-indigo-600 border border-indigo-100/50 px-1.5 py-0.5 rounded-md">طبقة الصوت</span>
               )}
-              {!hasBypass && (
+              {(item.bypass_settings?.enableCaption || item.bypass_settings?.caption_template_id) && (
+                <span className="text-[9px] font-bold bg-amber-50 text-amber-700 border border-amber-200/60 px-1.5 py-0.5 rounded-md">كابشن مدمج ✍️</span>
+              )}
+              {!hasBypass && !item.bypass_settings?.enableCaption && !item.bypass_settings?.caption_template_id && (
                 <span className="text-[9px] text-slate-400">بدون فلاتر كوبيرايت</span>
               )}
             </div>
