@@ -670,55 +670,85 @@ async function resolveCookies(reqCookies?: string): Promise<string> {
 }
 
 /**
- * Normalizes proxy strings from various formats:
- * - IP:PORT:USER:PASS or USER:PASS:IP:PORT
- * - socks5://..., socks5h://..., http://..., https://...
- * - Cleans duplicated string prefixes or dangerous chars
+ * Cleans, un-duplicates, and parses a proxy candidate into standard components.
  */
-function normalizeProxyString(raw: string): string {
+function cleanAndExtractProxy(raw: string): string {
   if (!raw) return "";
   let trimmed = raw.trim().replace(/["'`$();&|<>]/g, "");
   if (!trimmed) return "";
 
-  // Remove accidental duplicate prefixes like "http://...http://..."
+  // Remove accidental duplicate prefixes like "http://...http://..." or concatenated lines
   if (trimmed.startsWith("http://") && trimmed.indexOf("http://", 7) !== -1) {
     trimmed = trimmed.substring(0, trimmed.indexOf("http://", 7));
   } else if (trimmed.startsWith("https://") && trimmed.indexOf("https://", 8) !== -1) {
     trimmed = trimmed.substring(0, trimmed.indexOf("https://", 8));
   } else if (trimmed.startsWith("socks5://") && trimmed.indexOf("socks5://", 9) !== -1) {
     trimmed = trimmed.substring(0, trimmed.indexOf("socks5://", 9));
+  } else if (trimmed.startsWith("socks5h://") && trimmed.indexOf("socks5h://", 10) !== -1) {
+    trimmed = trimmed.substring(0, trimmed.indexOf("socks5h://", 10));
   }
 
-  // If already full URL with protocol
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("socks5://") || trimmed.startsWith("socks5h://")) {
-    return trimmed;
+  // Detect and strip protocol prefix to inspect raw payload
+  let protocol = "";
+  if (trimmed.startsWith("socks5h://")) {
+    protocol = "socks5h://";
+    trimmed = trimmed.slice(10);
+  } else if (trimmed.startsWith("socks5://")) {
+    protocol = "socks5://";
+    trimmed = trimmed.slice(9);
+  } else if (trimmed.startsWith("https://")) {
+    protocol = "https://";
+    trimmed = trimmed.slice(8);
+  } else if (trimmed.startsWith("http://")) {
+    protocol = "http://";
+    trimmed = trimmed.slice(7);
   }
 
-  // Format with @: user:pass@ip:port
+  // Remove repeated protocol residue if user pasted multiple times
+  trimmed = trimmed.replace(/^(http:\/\/|https:\/\/|socks5:\/\/|socks5h:\/\/)+/gi, "");
+
+  // If already formatted with @ (e.g., user:pass@ip:port)
   if (trimmed.includes("@")) {
-    return `http://${trimmed}`;
+    return protocol ? `${protocol}${trimmed}` : trimmed;
   }
 
-  // Colon separated parts
+  // Handle standard 4-part colon format: USER:PASS:IP:PORT or IP:PORT:USER:PASS
   const colonParts = trimmed.split(":");
   if (colonParts.length === 4) {
-    // Check if IP:PORT:USER:PASS or USER:PASS:IP:PORT
-    if (!isNaN(Number(colonParts[1]))) {
+    if (!isNaN(Number(colonParts[1])) && isNaN(Number(colonParts[3]))) {
+      // Format: IP:PORT:USER:PASS
       const [ip, port, user, pass] = colonParts;
-      return `http://${user}:${pass}@${ip}:${port}`;
+      const formatted = `${user}:${pass}@${ip}:${port}`;
+      return protocol ? `${protocol}${formatted}` : formatted;
     } else if (!isNaN(Number(colonParts[3]))) {
+      // Format: USER:PASS:IP:PORT
       const [user, pass, ip, port] = colonParts;
-      return `http://${user}:${pass}@${ip}:${port}`;
+      const formatted = `${user}:${pass}@${ip}:${port}`;
+      return protocol ? `${protocol}${formatted}` : formatted;
     }
   } else if (colonParts.length === 2 && !isNaN(Number(colonParts[1]))) {
-    return `http://${trimmed}`;
+    // Format: IP:PORT
+    return protocol ? `${protocol}${trimmed}` : trimmed;
   }
 
-  return trimmed;
+  return protocol ? `${protocol}${trimmed}` : trimmed;
+}
+
+/**
+ * Normalizes a single proxy string into a valid URL (preferring socks5:// if unknown/applicable).
+ */
+function normalizeProxyString(raw: string): string {
+  const cleaned = cleanAndExtractProxy(raw);
+  if (!cleaned) return "";
+  if (cleaned.startsWith("http://") || cleaned.startsWith("https://") || cleaned.startsWith("socks5://") || cleaned.startsWith("socks5h://")) {
+    return cleaned;
+  }
+  return `socks5://${cleaned}`;
 }
 
 /**
  * Parses all proxies from JSON, comma-separated, or newline-separated input.
+ * Generates both SOCKS5 and HTTP candidate variants so proxies work regardless of protocol.
  */
 function parseAllProxies(proxyStr: string): string[] {
   if (!proxyStr) return [];
@@ -736,14 +766,36 @@ function parseAllProxies(proxyStr: string): string[] {
       rawList = [trimmed];
     }
   } else {
-    rawList = trimmed.split(/[\n,;]+/).map(p => p.trim()).filter(Boolean);
+    const splitPattern = /(?=(?:http:\/\/|https:\/\/|socks5:\/\/|socks5h:\/\/))/gi;
+    const parts = trimmed.split(/[\n,;]+/);
+    for (const part of parts) {
+      if (part.includes("http://") || part.includes("https://") || part.includes("socks5://") || part.includes("socks5h://")) {
+        const sub = part.split(splitPattern).map(s => s.trim()).filter(Boolean);
+        rawList.push(...sub);
+      } else {
+        rawList.push(part);
+      }
+    }
   }
 
   const result: string[] = [];
   for (const raw of rawList) {
-    const norm = normalizeProxyString(raw);
-    if (norm && !result.includes(norm)) {
-      result.push(norm);
+    const cleaned = cleanAndExtractProxy(raw);
+    if (!cleaned) continue;
+
+    const baseWithoutProto = cleaned.replace(/^(https?|socks5h?):\/\//, "");
+
+    // Prioritize SOCKS5 protocols (yt-dlp works best with socks5:// and curl with socks5h://)
+    const variants = [
+      `socks5://${baseWithoutProto}`,
+      `socks5h://${baseWithoutProto}`,
+      `http://${baseWithoutProto}`
+    ];
+
+    for (const v of variants) {
+      if (!result.includes(v)) {
+        result.push(v);
+      }
     }
   }
   return result;
@@ -1881,50 +1933,69 @@ app.post("/api/test-proxy", async (req, res) => {
   }
 
   const rawProxy = proxyUrl.trim().replace(/["'`$();&|<>]/g, "");
-  const safeProxy = pickOneProxy(rawProxy);
-  console.log(`[Proxy Test] Testing proxy: ${safeProxy}`);
+  const candidates = parseAllProxies(rawProxy);
+  if (candidates.length === 0) {
+    return res.status(400).json({ error: "صيغة البروكسي غير صالحة. الصيغة المدعومة: IP:PORT أو USER:PASS:IP:PORT أو USER:PASS@IP:PORT" });
+  }
 
-  const start = Date.now();
-  // Call ip-api.com/json via curl with connect-timeout of 8 seconds
-  exec(`curl -s -x "${safeProxy}" --connect-timeout 8 http://ip-api.com/json`, (error, stdout, stderr) => {
-    const latencyMs = Date.now() - start;
+  console.log(`[Proxy Test] Testing proxy candidates (${candidates.length}):`, candidates);
 
-    if (error) {
-      console.warn(`[Proxy Test] Proxy check failed for ${safeProxy}:`, error.message, stderr);
-      return res.json({
-        success: false,
-        latencyMs,
-        error: `فشل الاتصال عبر البروكسي: ${error.message || stderr || "خطأ في الشبكة أو انتهت مهلة الاتصال"}`
-      });
-    }
+  let lastError = "";
+  let bestResult: any = null;
 
+  for (const candidate of candidates) {
+    const start = Date.now();
     try {
-      const data = JSON.parse(stdout);
-      if (data.status === "fail") {
-        return res.json({
-          success: false,
-          latencyMs,
-          error: `فشل تحديد الموقع: ${data.message || "استجابة غير صحيحة"}`
+      const result = await new Promise<any>((resolve) => {
+        let curlProxy = candidate;
+        if (curlProxy.startsWith("socks5://")) {
+          curlProxy = curlProxy.replace("socks5://", "socks5h://");
+        }
+        exec(`curl -s -x "${curlProxy}" --connect-timeout 8 "https://api.ipify.org?format=json"`, (error, stdout, stderr) => {
+          const latencyMs = Date.now() - start;
+          if (error) {
+            return resolve({ success: false, latencyMs, error: error.message || stderr || "خطأ في الشبكة" });
+          }
+          try {
+            const data = JSON.parse(stdout);
+            if (data && data.ip) {
+              return resolve({
+                success: true,
+                ip: data.ip,
+                candidate,
+                latencyMs
+              });
+            }
+            return resolve({ success: false, latencyMs, error: "استجابة غير متوقعة" });
+          } catch {
+            return resolve({ success: false, latencyMs, error: stdout.slice(0, 100) });
+          }
         });
-      }
+      });
 
-      return res.json({
-        success: true,
-        ip: data.query || "غير معروف",
-        country: data.country || "غير معروف",
-        countryCode: data.countryCode || "",
-        city: data.city || "",
-        isp: data.isp || "غير معروف",
-        latencyMs
-      });
-    } catch (parseErr: any) {
-      const trimmedStdout = stdout.substring(0, 200).trim();
-      return res.json({
-        success: false,
-        latencyMs,
-        error: trimmedStdout ? `استجابة غير صالحة من البروكسي (ربما يطلب تسجيل دخول أو ممتلئ): ${trimmedStdout}` : "لم يتم استلام أي استجابة من البروكسي (تأكد من صحة المنفذ والـ IP)."
-      });
+      if (result && result.success) {
+        bestResult = result;
+        break;
+      } else if (result && result.error) {
+        lastError = result.error;
+      }
+    } catch (e: any) {
+      lastError = e.message;
     }
+  }
+
+  if (bestResult && bestResult.success) {
+    return res.json({
+      success: true,
+      ip: bestResult.ip,
+      workingProxyUrl: bestResult.candidate,
+      latencyMs: bestResult.latencyMs
+    });
+  }
+
+  return res.json({
+    success: false,
+    error: `فشل الاتصال عبر البروكسي: ${lastError || "انتهت مهلة الاتصال أو تم رفضه من مزود البروكسي"}`
   });
 });
 
@@ -3593,9 +3664,13 @@ async function downloadWithCurl(
     }
   };
 
-  // Collect candidate proxies
+  // Collect candidate proxies (Proxy Only mode)
   const candidateProxies = await resolveAllProxies(proxyUrl);
-  console.log(`[Video Downloader] Candidate proxies available (${candidateProxies.length}):`, candidateProxies);
+  console.log(`[Video Downloader] [Proxy-Only Mode] Candidate proxies available (${candidateProxies.length}):`, candidateProxies);
+
+  if (!candidateProxies || candidateProxies.length === 0) {
+    throw new Error("تنبيه أمني: تم ضبط تنزيل مقاطع الفيديو عبر البروكسي فقط (Proxy Only). لم يتم العثور على أي عنوان بروكسي مُهيّأ في النظام. يرجى إضافة وتفعيل بروكسي صالح في الإعدادات قبل تنزيل الفيديوهات لتجنب حظر الخادم.");
+  }
 
   const targetSourceUrl = fallbackYtUrl || (
     url && (
@@ -3611,9 +3686,9 @@ async function downloadWithCurl(
     ) ? url : ""
   );
 
-  // Strategy 1: Download via yt-dlp directly into destination MP4 file
+  // Strategy 1: Download via yt-dlp directly into destination MP4 file via proxy only
   if (targetSourceUrl) {
-    console.log(`[Video Downloader] Attempting yt-dlp direct download for: ${targetSourceUrl} (format: ${formatId})...`);
+    console.log(`[Video Downloader] Attempting yt-dlp direct download for: ${targetSourceUrl} (format: ${formatId}) via proxy only...`);
 
     // Prepare format cascade list (favoring clean MP4 formats <= 1080p)
     const formatCandidates: string[] = [];
@@ -3627,50 +3702,51 @@ async function downloadWithCurl(
     formatCandidates.push("b/best");
     formatCandidates.push("best");
 
-    // Loop through proxies (and direct) with both cookie modes
-    const proxyAttempts = [...candidateProxies, ""]; // candidate proxies first, then direct
-    for (const pUrl of proxyAttempts) {
+    // Loop strictly through candidate proxies (Proxy Only)
+    for (const pUrl of candidateProxies) {
+      if (!pUrl || !pUrl.trim()) continue;
       for (const fmt of formatCandidates) {
         // Mode A: with cookies (if provided)
         if (cookiesText && cookiesText.trim()) {
           try {
-            console.log(`[Video Downloader] Trying yt-dlp with proxy "${pUrl || "Direct"}", format "${fmt}", with cookies...`);
-            await runYtDlp(["--no-playlist", "-f", fmt, "--merge-output-format", "mp4", "-o", `"${safeDest}"`, `"${targetSourceUrl}"`], cookiesText, pUrl || undefined);
+            console.log(`[Video Downloader] Trying yt-dlp with proxy "${pUrl}", format "${fmt}", with cookies...`);
+            await runYtDlp(["--no-playlist", "-f", fmt, "--merge-output-format", "mp4", "-o", `"${safeDest}"`, `"${targetSourceUrl}"`], cookiesText, pUrl);
             if (isVideoValid(safeDest)) {
-              console.log(`[Video Downloader] yt-dlp download succeeded (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
+              console.log(`[Video Downloader] yt-dlp download succeeded via proxy (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
               await ensureVideoUnderCloudinaryLimit(safeDest);
               return;
             }
           } catch (ytErr: any) {
-            console.warn(`[Video Downloader] yt-dlp attempt failed (proxy: ${pUrl || "Direct"}, cookies: yes, fmt: ${fmt}): ${ytErr.message}`);
+            console.warn(`[Video Downloader] yt-dlp attempt failed (proxy: ${pUrl}, cookies: yes, fmt: ${fmt}): ${ytErr.message}`);
           }
         }
 
         // Mode B: without cookies (bypasses invalid/rotated cookies)
         try {
-          console.log(`[Video Downloader] Trying yt-dlp with proxy "${pUrl || "Direct"}", format "${fmt}", without cookies...`);
-          await runYtDlp(["--no-playlist", "-f", fmt, "--merge-output-format", "mp4", "-o", `"${safeDest}"`, `"${targetSourceUrl}"`], undefined, pUrl || undefined);
+          console.log(`[Video Downloader] Trying yt-dlp with proxy "${pUrl}", format "${fmt}", without cookies...`);
+          await runYtDlp(["--no-playlist", "-f", fmt, "--merge-output-format", "mp4", "-o", `"${safeDest}"`, `"${targetSourceUrl}"`], undefined, pUrl);
           if (isVideoValid(safeDest)) {
-            console.log(`[Video Downloader] yt-dlp download succeeded (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
+            console.log(`[Video Downloader] yt-dlp download succeeded via proxy (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
             await ensureVideoUnderCloudinaryLimit(safeDest);
             return;
           }
         } catch (ytErrNoCookies: any) {
-          console.warn(`[Video Downloader] yt-dlp attempt failed (proxy: ${pUrl || "Direct"}, cookies: no, fmt: ${fmt}): ${ytErrNoCookies.message}`);
+          console.warn(`[Video Downloader] yt-dlp attempt failed (proxy: ${pUrl}, cookies: no, fmt: ${fmt}): ${ytErrNoCookies.message}`);
         }
       }
     }
   }
 
-  // Strategy 2: If stream URL is an HLS playlist (.m3u8), download with FFmpeg
+  // Strategy 2: If stream URL is an HLS playlist (.m3u8), download with FFmpeg strictly via proxy
   const directStreamUrl = (url && url.startsWith("http")) ? url : "";
   if (directStreamUrl && (directStreamUrl.includes(".m3u8") || directStreamUrl.includes("/hls_playlist/") || directStreamUrl.includes("/manifest/"))) {
-    console.log(`[Video Downloader] Detected HLS stream. Attempting FFmpeg download from: ${directStreamUrl}`);
-    for (const pUrl of [...candidateProxies, ""]) {
+    console.log(`[Video Downloader] Detected HLS stream. Attempting FFmpeg download via proxy from: ${directStreamUrl}`);
+    for (const pUrl of candidateProxies) {
+      if (!pUrl || !pUrl.trim()) continue;
       try {
         await new Promise<void>((resolve, reject) => {
           const ffmpegArgs = ["-y"];
-          if (pUrl && pUrl.startsWith("http://")) {
+          if (pUrl && (pUrl.startsWith("http://") || pUrl.startsWith("https://"))) {
             ffmpegArgs.push("-http_proxy", pUrl);
           }
           ffmpegArgs.push(
@@ -3694,38 +3770,35 @@ async function downloadWithCurl(
           });
         });
         if (isVideoValid(safeDest)) {
-          console.log(`[Video Downloader] FFmpeg HLS download succeeded: ${safeDest}`);
+          console.log(`[Video Downloader] FFmpeg HLS download via proxy succeeded: ${safeDest}`);
           return;
         }
       } catch (ffErr: any) {
-        console.warn(`[Video Downloader] FFmpeg HLS download failed: ${ffErr.message}`);
+        console.warn(`[Video Downloader] FFmpeg HLS download via proxy failed: ${ffErr.message}`);
       }
     }
   }
 
-  // Strategy 3: Download direct media stream with curl (rotating proxies)
+  // Strategy 3: Download direct media stream with curl strictly via proxy
   if (directStreamUrl) {
-    const executeCurl = (proxy?: string): Promise<boolean> => {
+    const executeCurl = (proxy: string): Promise<boolean> => {
       return new Promise((resolve) => {
-        let proxyArg = "";
-        if (proxy && proxy.trim()) {
-          let safeProxy = proxy.trim().replace(/["'`$();&|<>]/g, "");
-          if (safeProxy.startsWith("socks5://")) {
-            safeProxy = safeProxy.replace("socks5://", "socks5h://");
-          }
-          proxyArg = `-x "${safeProxy}"`;
+        let safeProxy = proxy.trim().replace(/["'`$();&|<>]/g, "");
+        if (safeProxy.startsWith("socks5://")) {
+          safeProxy = safeProxy.replace("socks5://", "socks5h://");
         }
+        const proxyArg = `-x "${safeProxy}"`;
 
         const safeUrl = directStreamUrl.replace(/["']/g, "");
         const cmd = `curl -L -s --connect-timeout 20 --max-time 300 ${proxyArg} -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36" -e "https://www.youtube.com/" -o "${safeDest}" "${safeUrl}"`;
         
-        console.log(`[Video Downloader] Attempting curl download (Proxy: ${proxy || "None"})...`);
+        console.log(`[Video Downloader] Attempting curl download (Proxy: ${proxy})...`);
         exec(cmd, (error) => {
           if (!error && isVideoValid(safeDest)) {
-            console.log(`[Video Downloader] Curl download succeeded (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
+            console.log(`[Video Downloader] Curl download via proxy succeeded (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
             resolve(true);
           } else {
-            if (error) console.warn(`[Video Downloader] Curl download failed:`, error.message);
+            if (error) console.warn(`[Video Downloader] Curl download via proxy failed:`, error.message);
             resolve(false);
           }
         });
@@ -3733,58 +3806,13 @@ async function downloadWithCurl(
     };
 
     for (const pUrl of candidateProxies) {
+      if (!pUrl || !pUrl.trim()) continue;
       const ok = await executeCurl(pUrl);
       if (ok) return;
     }
-
-    const okDirect = await executeCurl(undefined);
-    if (okDirect) return;
   }
 
-  // Strategy 4: Fallback to Cobalt / Invidious API for YouTube videos
-  if (targetSourceUrl && (targetSourceUrl.includes("youtube.com") || targetSourceUrl.includes("youtu.be") || targetSourceUrl.includes("tiktok.com") || targetSourceUrl.includes("instagram.com"))) {
-    console.log(`[Video Downloader] Trying fallback API extraction for: ${targetSourceUrl}`);
-    const cobaltInstances = [
-      "https://api.cobalt.tools",
-      "https://cobalt-api.kwiatekm.tokyo",
-      "https://api.kwiatek.xyz",
-    ];
-
-    for (const inst of cobaltInstances) {
-      try {
-        const response = await fetch(`${inst}/api/json`, {
-          method: "POST",
-          headers: {
-            "Accept": "application/json",
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            url: targetSourceUrl,
-            vQuality: "1080",
-            filenamePattern: "basic"
-          }),
-          signal: AbortSignal.timeout(10000)
-        });
-
-        if (response.ok) {
-          const resData: any = await response.json();
-          const streamUrl = resData.url || (resData.picker && resData.picker[0]?.url);
-          if (streamUrl && typeof streamUrl === "string") {
-            console.log(`[Video Downloader] Got stream URL from Cobalt fallback: ${streamUrl}`);
-            await downloadFileHttps(streamUrl, safeDest);
-            if (isVideoValid(safeDest)) {
-              console.log(`[Video Downloader] Cobalt fallback download succeeded!`);
-              return;
-            }
-          }
-        }
-      } catch (cobaltErr: any) {
-        console.warn(`[Video Downloader] Cobalt fallback failed for ${inst}:`, cobaltErr.message);
-      }
-    }
-  }
-
-  throw new Error("فشل تنزيل مقطع الفيديو بعد عدة محاولات عبر كافة مسارات التحميل (البروكسي، الاتصال المباشر، وتفريغ التدفق). يرجى التحقق من جودة البروكسي أو صلاحية الكوكيز أو التأكد من أن الفيديو عام.");
+  throw new Error("فشل تنزيل مقطع الفيديو عبر البروكسي (Proxy-Only). تعذر التحميل باستخدام عناوين البروكسي المتاحة. يرجى التحقق من اتصال وجودة البروكسي أو صلاحية الكوكيز.");
 }
 
 /**
@@ -4318,18 +4346,19 @@ app.get("/api/tiktok/serve", (req, res) => {
  * Downloads a video from TikTok
  */
 app.post("/api/tiktok/download", async (req, res) => {
-  const { url } = req.body;
+  const { url, proxyUrl: clientProxy } = req.body;
   if (!url) return res.status(400).json({ error: "URL is required" });
 
   try {
+    const proxyUrl = await resolveProxy(clientProxy);
     // 1. Get metadata json
-    const infoStdout = await runYtDlp(["-j", `"${url}"`, "--extractor-args", "tiktok:player_client=android", "--no-warnings"]);
+    const infoStdout = await runYtDlp(["-j", `"${url}"`, "--extractor-args", "tiktok:player_client=android", "--no-warnings"], undefined, proxyUrl);
     const data = JSON.parse(infoStdout);
     const filename = `${data.id}.mp4`;
     const filePath = path.join(DOWNLOADS_DIR, filename);
 
-    // 2. Download the video
-    await runYtDlp(["-o", filePath, `${url}`, "--extractor-args", "tiktok:player_client=android", "--no-warnings"]);
+    // 2. Download the video via proxy
+    await downloadWithCurl(url, filePath, proxyUrl, url);
     
     res.json({
       title: data.title,
@@ -6022,6 +6051,11 @@ async function runScheduledClonesStep() {
   let clone: any = null;
   try {
     const p = getDbPool();
+    // Recover any orphaned 'processing' tasks that might have been interrupted by a reboot
+    await p.query(
+      "UPDATE scheduled_clones SET status = 'pending' WHERE status = 'processing' AND scheduled_time <= NOW() - INTERVAL '3 minutes'"
+    );
+
     const result = await p.query(
       "SELECT * FROM scheduled_clones WHERE status = 'pending' AND scheduled_time <= NOW() ORDER BY scheduled_time ASC LIMIT 1"
     );
@@ -6475,7 +6509,14 @@ function startScheduledClonesAgent() {
     runScheduledClonesStep().catch(err => {
       console.error("[Scheduled Clones Agent] Background run error:", err);
     });
-  }, 30000);
+  }, 20000);
+
+  // Run initial scan 3 seconds after boot
+  setTimeout(() => {
+    runScheduledClonesStep().catch(err => {
+      console.error("[Scheduled Clones Agent] Initial boot run error:", err);
+    });
+  }, 3000);
 }
 
 // REST Endpoints for Agent Management
