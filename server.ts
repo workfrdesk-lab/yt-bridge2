@@ -399,7 +399,10 @@ async function runYtDlp(args: string[], cookiesText?: string, proxyUrl?: string)
     }
 
     if (proxyUrl && proxyUrl.trim()) {
-      const safeProxy = proxyUrl.trim().replace(/["'`$();&|<>]/g, "");
+      let safeProxy = proxyUrl.trim().replace(/["'`$();&|<>]/g, "");
+      if (safeProxy.startsWith("socks5://")) {
+        safeProxy = safeProxy.replace("socks5://", "socks5h://");
+      }
       cmdArgs.push("--proxy", `"${safeProxy}"`);
       console.log(`[Server] Applying proxy: ${safeProxy}`);
     }
@@ -3448,6 +3451,47 @@ app.post("/api/social-video-info", async (req, res) => {
 
   try {
     const isTikTok = cleanUrl.includes("tiktok.com");
+    if (isTikTok) {
+      console.log(`[Social Info API] Fetching TikTok info via high-speed API: ${cleanUrl}`);
+      const tikData = await fetchTikTokInfoViaApi(cleanUrl);
+      if (tikData) {
+        const videoId = tikData.id || `vid_${Date.now()}`;
+        const filename = `social_${videoId}.mp4`;
+        const filePath = path.join(downloadsDir, filename);
+
+        if (!fs.existsSync(filePath) || fs.statSync(filePath).size < 50000) {
+          const candidateProxies = await resolveAllProxies(proxyUrl);
+          await downloadTikTokViaApi(cleanUrl, filePath, candidateProxies);
+        }
+
+        const finalStreamUrl = (fs.existsSync(filePath) && fs.statSync(filePath).size >= 50000)
+          ? `/api/tiktok/serve?filename=${filename}`
+          : (tikData.hdplay || tikData.play || cleanUrl);
+
+        return res.json({
+          id: videoId,
+          title: tikData.title || "TikTok Video",
+          thumbnail: tikData.cover || "",
+          duration: tikData.duration || 0,
+          uploader: tikData.author?.nickname || tikData.author?.unique_id || "TikTok Creator",
+          description: tikData.title || "",
+          bestVideoUrl: finalStreamUrl,
+          videoUrl: cleanUrl,
+          youtubeUrl: cleanUrl,
+          formats: [
+            {
+              formatId: "best",
+              formatNote: "أفضل جودة (HD)",
+              ext: "mp4",
+              filesize: fs.existsSync(filePath) ? fs.statSync(filePath).size : (tikData.size || null),
+              resolution: "HD",
+              url: finalStreamUrl
+            }
+          ]
+        });
+      }
+    }
+
     const extraArgs = isTikTok ? ["--extractor-args", "tiktok:player_client=android"] : [];
 
     // 1. Get JSON metadata
@@ -3593,12 +3637,128 @@ async function ensureVideoUnderCloudinaryLimit(filePath: string): Promise<void> 
 }
 
 /**
+ * Helper to fetch TikTok metadata directly via high-speed API (TikWM & fallback mirrors)
+ */
+async function fetchTikTokInfoViaApi(tiktokUrl: string): Promise<any | null> {
+  try {
+    if (!tiktokUrl || typeof tiktokUrl !== "string") return null;
+    const clean = tiktokUrl.trim();
+    const encoded = encodeURIComponent(clean);
+    const apiEndpoints = [
+      `https://www.tikwm.com/api/?url=${encoded}&hd=1`,
+      `https://tikwm.com/api/?url=${encoded}&hd=1`,
+      `https://api.tikwm.com/api/?url=${encoded}&hd=1`
+    ];
+
+    for (const ep of apiEndpoints) {
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 12000);
+        const res = await fetch(ep, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "application/json"
+          },
+          signal: controller.signal
+        });
+        clearTimeout(timeout);
+        if (res.ok) {
+          const json: any = await res.json();
+          if (json && json.code === 0 && json.data) {
+            return json.data;
+          }
+        }
+      } catch (epErr: any) {
+        console.warn(`[TikTok API Helper] Endpoint (${ep}) failed:`, epErr.message);
+      }
+    }
+    return null;
+  } catch (err: any) {
+    console.error("[TikTok API Helper] Error:", err.message);
+    return null;
+  }
+}
+
+/**
+ * Helper to download TikTok HD video directly without watermark
+ */
+async function downloadTikTokViaApi(tiktokUrl: string, destPath: string, candidateProxies: string[] = []): Promise<boolean> {
+  try {
+    const data = await fetchTikTokInfoViaApi(tiktokUrl);
+    if (!data) return false;
+
+    const streamUrl = data.hdplay || data.play || data.wmplay;
+    if (!streamUrl || typeof streamUrl !== "string") return false;
+
+    console.log(`[TikTok Downloader] Retrieved watermark-free stream URL for: ${tiktokUrl}`);
+
+    // Try direct fetch
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 25000);
+      const res = await fetch(streamUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+          "Referer": "https://www.tiktok.com/"
+        },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      if (res.ok) {
+        const buffer = await res.arrayBuffer();
+        if (buffer.byteLength >= 50000) {
+          fs.writeFileSync(destPath, Buffer.from(buffer));
+          console.log(`[TikTok Downloader] Direct fetch downloaded successfully (${buffer.byteLength} bytes)`);
+          return true;
+        }
+      }
+    } catch (fetchErr: any) {
+      console.warn(`[TikTok Downloader] Direct stream fetch failed, trying curl:`, fetchErr.message);
+    }
+
+    // Try curl via candidate proxies or direct
+    const proxyList = candidateProxies.length > 0 ? candidateProxies : [""];
+    for (const proxy of proxyList) {
+      try {
+        let safeProxy = proxy ? proxy.trim().replace(/["'`$();&|<>]/g, "") : "";
+        if (safeProxy.startsWith("socks5://")) {
+          safeProxy = safeProxy.replace("socks5://", "socks5h://");
+        }
+        const proxyArg = safeProxy ? `-x "${safeProxy}"` : "";
+        const safeStreamUrl = streamUrl.replace(/["']/g, "");
+        const curlCmd = `curl -L -s --connect-timeout 20 --max-time 300 ${proxyArg} -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36" -e "https://www.tiktok.com/" -o "${destPath}" "${safeStreamUrl}"`;
+
+        await new Promise<void>((resolve, reject) => {
+          exec(curlCmd, (err) => {
+            if (err) reject(err);
+            else resolve();
+          });
+        });
+
+        if (fs.existsSync(destPath) && fs.statSync(destPath).size >= 50000) {
+          console.log(`[TikTok Downloader] Curl download succeeded (${fs.statSync(destPath).size} bytes)`);
+          return true;
+        }
+      } catch (cErr: any) {
+        console.warn(`[TikTok Downloader] Curl attempt failed:`, cErr.message);
+      }
+    }
+
+    return false;
+  } catch (err: any) {
+    console.error("[TikTok Downloader] Error in downloadTikTokViaApi:", err.message);
+    return false;
+  }
+}
+
+/**
  * Helper to download a video URL to a local temporary file using multiple resilient fallbacks:
  * 1. Local served API intercept
- * 2. Multi-tier yt-dlp direct download (with proxy rotation + format cascade + cookie/no-cookie toggling)
- * 3. FFmpeg HLS playlist download (for .m3u8 streams)
- * 4. Resilient curl media stream download (with proxy rotation & browser headers)
- * 5. Public Cobalt / Invidious fallback extractor for strictly bot-blocked streams
+ * 2. High-speed direct TikTok HD watermark-free API extractor
+ * 3. Multi-tier yt-dlp direct download (with proxy rotation + format cascade + cookie/no-cookie toggling)
+ * 4. FFmpeg HLS playlist download (for .m3u8 streams)
+ * 5. Resilient curl media stream download (with proxy rotation & browser headers)
+ * 6. Public Cobalt / Invidious fallback extractor for strictly bot-blocked streams
  */
 async function downloadWithCurl(
   url: string,
@@ -3666,11 +3826,7 @@ async function downloadWithCurl(
 
   // Collect candidate proxies (Proxy Only mode)
   const candidateProxies = await resolveAllProxies(proxyUrl);
-  console.log(`[Video Downloader] [Proxy-Only Mode] Candidate proxies available (${candidateProxies.length}):`, candidateProxies);
-
-  if (!candidateProxies || candidateProxies.length === 0) {
-    throw new Error("تنبيه أمني: تم ضبط تنزيل مقاطع الفيديو عبر البروكسي فقط (Proxy Only). لم يتم العثور على أي عنوان بروكسي مُهيّأ في النظام. يرجى إضافة وتفعيل بروكسي صالح في الإعدادات قبل تنزيل الفيديوهات لتجنب حظر الخادم.");
-  }
+  console.log(`[Video Downloader] Candidate proxies available (${candidateProxies.length}):`, candidateProxies);
 
   const targetSourceUrl = fallbackYtUrl || (
     url && (
@@ -3686,9 +3842,23 @@ async function downloadWithCurl(
     ) ? url : ""
   );
 
-  // Strategy 1: Download via yt-dlp directly into destination MP4 file via proxy only
+  // Strategy 0: Direct TikTok API extraction (bypasses bot protection, captchas, and proxy blocks)
+  const isTikTok = (targetSourceUrl && targetSourceUrl.includes("tiktok.com")) || (url && url.includes("tiktok.com"));
+  if (isTikTok) {
+    const tikUrl = targetSourceUrl || url;
+    console.log(`[Video Downloader] Detected TikTok URL. Attempting direct watermark-free API download for: ${tikUrl}`);
+    const tikOk = await downloadTikTokViaApi(tikUrl, safeDest, candidateProxies);
+    if (tikOk && isVideoValid(safeDest)) {
+      console.log(`[Video Downloader] TikTok direct API download succeeded (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
+      await ensureVideoUnderCloudinaryLimit(safeDest);
+      return;
+    }
+    console.warn(`[Video Downloader] TikTok direct API download failed, falling back to yt-dlp cascade...`);
+  }
+
+  // Strategy 1: Download via yt-dlp directly into destination MP4 file
   if (targetSourceUrl) {
-    console.log(`[Video Downloader] Attempting yt-dlp direct download for: ${targetSourceUrl} (format: ${formatId}) via proxy only...`);
+    console.log(`[Video Downloader] Attempting yt-dlp direct download for: ${targetSourceUrl} (format: ${formatId})...`);
 
     // Prepare format cascade list (favoring clean MP4 formats <= 1080p)
     const formatCandidates: string[] = [];
@@ -3702,36 +3872,36 @@ async function downloadWithCurl(
     formatCandidates.push("b/best");
     formatCandidates.push("best");
 
-    // Loop strictly through candidate proxies (Proxy Only)
-    for (const pUrl of candidateProxies) {
-      if (!pUrl || !pUrl.trim()) continue;
+    // Loop through candidate proxies (plus direct as fallback if candidate proxies fail)
+    const proxyAttempts = candidateProxies.length > 0 ? [...candidateProxies, undefined] : [undefined];
+    for (const pUrl of proxyAttempts) {
       for (const fmt of formatCandidates) {
         // Mode A: with cookies (if provided)
         if (cookiesText && cookiesText.trim()) {
           try {
-            console.log(`[Video Downloader] Trying yt-dlp with proxy "${pUrl}", format "${fmt}", with cookies...`);
+            console.log(`[Video Downloader] Trying yt-dlp with proxy "${pUrl || 'direct'}", format "${fmt}", with cookies...`);
             await runYtDlp(["--no-playlist", "-f", fmt, "--merge-output-format", "mp4", "-o", `"${safeDest}"`, `"${targetSourceUrl}"`], cookiesText, pUrl);
             if (isVideoValid(safeDest)) {
-              console.log(`[Video Downloader] yt-dlp download succeeded via proxy (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
+              console.log(`[Video Downloader] yt-dlp download succeeded (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
               await ensureVideoUnderCloudinaryLimit(safeDest);
               return;
             }
           } catch (ytErr: any) {
-            console.warn(`[Video Downloader] yt-dlp attempt failed (proxy: ${pUrl}, cookies: yes, fmt: ${fmt}): ${ytErr.message}`);
+            console.warn(`[Video Downloader] yt-dlp attempt failed (proxy: ${pUrl || 'direct'}, cookies: yes, fmt: ${fmt}): ${ytErr.message}`);
           }
         }
 
         // Mode B: without cookies (bypasses invalid/rotated cookies)
         try {
-          console.log(`[Video Downloader] Trying yt-dlp with proxy "${pUrl}", format "${fmt}", without cookies...`);
+          console.log(`[Video Downloader] Trying yt-dlp with proxy "${pUrl || 'direct'}", format "${fmt}", without cookies...`);
           await runYtDlp(["--no-playlist", "-f", fmt, "--merge-output-format", "mp4", "-o", `"${safeDest}"`, `"${targetSourceUrl}"`], undefined, pUrl);
           if (isVideoValid(safeDest)) {
-            console.log(`[Video Downloader] yt-dlp download succeeded via proxy (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
+            console.log(`[Video Downloader] yt-dlp download succeeded (${fs.statSync(safeDest).size} bytes): ${safeDest}`);
             await ensureVideoUnderCloudinaryLimit(safeDest);
             return;
           }
         } catch (ytErrNoCookies: any) {
-          console.warn(`[Video Downloader] yt-dlp attempt failed (proxy: ${pUrl}, cookies: no, fmt: ${fmt}): ${ytErrNoCookies.message}`);
+          console.warn(`[Video Downloader] yt-dlp attempt failed (proxy: ${pUrl || 'direct'}, cookies: no, fmt: ${fmt}): ${ytErrNoCookies.message}`);
         }
       }
     }
@@ -4363,19 +4533,35 @@ app.post("/api/tiktok/download", async (req, res) => {
 
   try {
     const proxyUrl = await resolveProxy(clientProxy);
-    // 1. Get metadata json
-    const infoStdout = await runYtDlp(["-j", `"${url}"`, "--extractor-args", "tiktok:player_client=android", "--no-warnings"], undefined, proxyUrl);
-    const data = JSON.parse(infoStdout);
-    const filename = `${data.id}.mp4`;
-    const filePath = path.join(DOWNLOADS_DIR, filename);
+    const candidateProxies = await resolveAllProxies(proxyUrl);
+    const cleanUrl = url.trim();
 
-    // 2. Download the video via proxy
-    await downloadWithCurl(url, filePath, proxyUrl, url);
+    // 1. Try high-speed direct API extraction first
+    const tikInfo = await fetchTikTokInfoViaApi(cleanUrl);
+    if (tikInfo) {
+      const vidId = tikInfo.id || `tiktok_${Date.now()}`;
+      const filename = `tiktok_${vidId}.mp4`;
+      const filePath = path.join(DOWNLOADS_DIR, filename);
+
+      const dlOk = await downloadTikTokViaApi(cleanUrl, filePath, candidateProxies);
+      if (dlOk && fs.existsSync(filePath) && fs.statSync(filePath).size >= 50000) {
+        return res.json({
+          title: tikInfo.title || "TikTok Video",
+          url: `/api/tiktok/serve?filename=${filename}`,
+          thumbnail: tikInfo.cover || "",
+        });
+      }
+    }
+
+    // 2. Fallback to yt-dlp & downloadWithCurl
+    const filename = `tiktok_${Date.now()}_${Math.floor(Math.random() * 100000)}.mp4`;
+    const filePath = path.join(DOWNLOADS_DIR, filename);
+    await downloadWithCurl(cleanUrl, filePath, proxyUrl, cleanUrl);
     
     res.json({
-      title: data.title,
-      url: `/api/tiktok/serve?filename=${filename}`, // Relative path
-      thumbnail: data.thumbnail,
+      title: "TikTok Video",
+      url: `/api/tiktok/serve?filename=${filename}`,
+      thumbnail: "",
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
@@ -5051,6 +5237,232 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
     console.log("[Buffer GraphQL] Channel service map prefetch skipped:", mapErr.message);
   }
 
+  // Helper to construct a clean title suitable for YouTube/Pinterest
+  const rawPostText = (text || "").trim();
+  let cleanTitle = rawPostText.split("\n")[0] || "";
+  cleanTitle = cleanTitle.replace(/^[#\s]+/, "").trim();
+  if (!cleanTitle || cleanTitle.length < 3) {
+    cleanTitle = rawPostText.slice(0, 80).trim() || "Shorts Video";
+  }
+  if (cleanTitle.length > 95) {
+    cleanTitle = cleanTitle.slice(0, 95).trim();
+  }
+
+  // Universal helper to build candidates for any known or requested service
+  const buildCandidatesForService = (serviceName: string, channelId: string) => {
+    const s = (serviceName || "").toLowerCase().trim();
+    const cands: any[] = [];
+
+    if (s === "youtube" || s.includes("youtube")) {
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: {
+          youtube: {
+            title: cleanTitle,
+            categoryId: "24", // Entertainment (standard for shorts & viral clips)
+            privacy: "public"
+          }
+        }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: {
+          youtube: {
+            title: cleanTitle,
+            categoryId: "22", // People & Blogs
+            privacy: "public"
+          }
+        }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: {
+          youtube: {
+            title: cleanTitle,
+            categoryId: "24"
+          }
+        }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: {
+          youtube: {
+            title: cleanTitle,
+            categoryId: "22"
+          }
+        }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: {
+          youtube: {
+            title: cleanTitle
+          }
+        }
+      });
+      return cands;
+    }
+
+    if (s === "facebook" || s.includes("facebook")) {
+      if (videoUrl) {
+        cands.push({
+          ...baseInput,
+          channelId,
+          metadata: { facebook: { type: "reel" } }
+        });
+        cands.push({
+          ...baseInput,
+          channelId,
+          metadata: { facebook: { type: "post" } }
+        });
+      } else {
+        cands.push({
+          ...baseInput,
+          channelId,
+          metadata: { facebook: { type: "post" } }
+        });
+      }
+      return cands;
+    }
+
+    if (s === "instagram" || s.includes("instagram")) {
+      if (videoUrl) {
+        cands.push({
+          ...baseInput,
+          channelId,
+          metadata: { instagram: { type: "reel", shouldShareToFeed: true } }
+        });
+        cands.push({
+          ...baseInput,
+          channelId,
+          metadata: { instagram: { type: "post" } }
+        });
+      } else {
+        cands.push({
+          ...baseInput,
+          channelId,
+          metadata: { instagram: { type: "post" } }
+        });
+      }
+      return cands;
+    }
+
+    if (s === "tiktok" || s.includes("tiktok")) {
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { tiktok: {} }
+      });
+      cands.push({
+        ...baseInput,
+        channelId
+      });
+      return cands;
+    }
+
+    if (s === "pinterest" || s.includes("pinterest")) {
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { pinterest: { title: cleanTitle } }
+      });
+      cands.push({
+        ...baseInput,
+        channelId
+      });
+      return cands;
+    }
+
+    if (s === "threads" || s.includes("threads")) {
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { threads: {} }
+      });
+      cands.push({
+        ...baseInput,
+        channelId
+      });
+      return cands;
+    }
+
+    if (s === "twitter" || s === "x" || s.includes("twitter")) {
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { twitter: {} }
+      });
+      cands.push({
+        ...baseInput,
+        channelId
+      });
+      return cands;
+    }
+
+    if (s === "linkedin" || s.includes("linkedin")) {
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { linkedin: {} }
+      });
+      cands.push({
+        ...baseInput,
+        channelId
+      });
+      return cands;
+    }
+
+    // Default generic fallback list for unknown channels
+    if (videoUrl) {
+      // If the text looks like YouTube shorts or YouTube was mentioned, try YouTube first
+      if (rawPostText.toLowerCase().includes("#shorts") || rawPostText.toLowerCase().includes("youtube")) {
+        cands.push(...buildCandidatesForService("youtube", channelId));
+      }
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { facebook: { type: "reel" } }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { instagram: { type: "reel", shouldShareToFeed: true } }
+      });
+      cands.push(...buildCandidatesForService("youtube", channelId));
+      cands.push({
+        ...baseInput,
+        channelId
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { facebook: { type: "post" } }
+      });
+    } else {
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { facebook: { type: "post" } }
+      });
+      cands.push({
+        ...baseInput,
+        channelId
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { instagram: { type: "post" } }
+      });
+    }
+
+    return cands;
+  };
+
   const query = `mutation CreatePost($input: CreatePostInput!) {
     createPost(input: $input) {
       __typename
@@ -5096,109 +5508,18 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
         if (!cleanProfId) continue;
 
         const knownService = serviceMap[cleanProfId] || "";
-        console.log(`[Buffer GraphQL] Publishing for channel ${cleanProfId} (service: "${knownService || 'unknown'}")...`);
+        console.log(`[Buffer GraphQL] Publishing for channel ${cleanProfId} (detected service: "${knownService || 'unknown'}")...`);
 
         // Build candidate inputs ordered by likelihood of success for this service
-        const candidateInputs: any[] = [];
-
-        if (knownService === "facebook" || knownService.includes("facebook")) {
-          if (videoUrl) {
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { facebook: { type: "reel" } }
-            });
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { facebook: { type: "post" } }
-            });
-          } else {
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { facebook: { type: "post" } }
-            });
-          }
-        } else if (knownService === "instagram" || knownService.includes("instagram")) {
-          if (videoUrl) {
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { instagram: { type: "reel", shouldShareToFeed: true } }
-            });
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { instagram: { type: "post" } }
-            });
-          } else {
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { instagram: { type: "post" } }
-            });
-          }
-        } else if (knownService === "tiktok" || knownService.includes("tiktok")) {
-          candidateInputs.push({
-            ...baseInput,
-            channelId: cleanProfId,
-            metadata: { tiktok: {} }
-          });
-          candidateInputs.push({
-            ...baseInput,
-            channelId: cleanProfId
-          });
-        } else {
-          // If unknown, prepare smart fallback sequence:
-          // 1. Try with Facebook Reel (if video) or Facebook Post (if not)
-          // 2. Try default without metadata
-          // 3. Try Facebook Post
-          // 4. Try Instagram Reel
-          if (videoUrl) {
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { facebook: { type: "reel" } }
-            });
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId
-            });
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { facebook: { type: "post" } }
-            });
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { instagram: { type: "reel", shouldShareToFeed: true } }
-            });
-          } else {
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { facebook: { type: "post" } }
-            });
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId
-            });
-            candidateInputs.push({
-              ...baseInput,
-              channelId: cleanProfId,
-              metadata: { instagram: { type: "post" } }
-            });
-          }
-        }
+        let candidateInputs: any[] = buildCandidatesForService(knownService, cleanProfId);
 
         let channelSuccess = false;
         let lastChannelError = "";
 
-        for (const inputCandidate of candidateInputs) {
+        for (let i = 0; i < candidateInputs.length; i++) {
+          const inputCandidate = candidateInputs[i];
           try {
-            console.log(`[Buffer GraphQL] Trying candidate for channel ${cleanProfId} with metadata:`, JSON.stringify(inputCandidate.metadata || {}));
+            console.log(`[Buffer GraphQL] Trying candidate ${i + 1}/${candidateInputs.length} for channel ${cleanProfId} with metadata:`, JSON.stringify(inputCandidate.metadata || {}));
             const res = await fetch(url, {
               method: "POST",
               headers: {
@@ -5215,8 +5536,22 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
 
             const body = await res.json();
             if (body.errors && body.errors.length > 0) {
-              lastChannelError = body.errors[0].message;
-              console.warn(`[Buffer GraphQL] GraphQL errors for ${cleanProfId}:`, body.errors[0].message);
+              const gqlErrMsg = body.errors[0].message || "";
+              lastChannelError = gqlErrMsg;
+              console.warn(`[Buffer GraphQL] GraphQL errors for ${cleanProfId}:`, gqlErrMsg);
+
+              // Auto-heal if Buffer suggests the expected key (e.g. Expected key: "youtube")
+              const match = gqlErrMsg.match(/Expected key:\s*"?([a-zA-Z0-9_]+)"?/i);
+              if (match && match[1]) {
+                const expectedService = match[1].toLowerCase();
+                console.log(`[Buffer GraphQL] Auto-healing from error message. Retrying with expected service: "${expectedService}"`);
+                const healedCandidates = buildCandidatesForService(expectedService, cleanProfId);
+                for (const hc of healedCandidates) {
+                  if (!candidateInputs.some(c => JSON.stringify(c.metadata) === JSON.stringify(hc.metadata))) {
+                    candidateInputs.push(hc);
+                  }
+                }
+              }
               continue;
             }
 
@@ -5236,6 +5571,27 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
             const errMsg = payload.message || `خطأ (${payload.__typename})`;
             lastChannelError = errMsg;
             console.warn(`[Buffer GraphQL] Candidate rejected for ${cleanProfId}: ${errMsg}`);
+
+            // Auto-heal if payload error message indicates expected service
+            const matchPayload = errMsg.match(/Expected key:\s*"?([a-zA-Z0-9_]+)"?/i);
+            if (matchPayload && matchPayload[1]) {
+              const expectedService = matchPayload[1].toLowerCase();
+              console.log(`[Buffer GraphQL] Auto-healing from payload error. Retrying with expected service: "${expectedService}"`);
+              const healedCandidates = buildCandidatesForService(expectedService, cleanProfId);
+              for (const hc of healedCandidates) {
+                if (!candidateInputs.some(c => JSON.stringify(c.metadata) === JSON.stringify(hc.metadata))) {
+                  candidateInputs.push(hc);
+                }
+              }
+            } else if (errMsg.includes("YouTube posts require") || errMsg.includes("youtube")) {
+              console.log(`[Buffer GraphQL] Auto-healing: Detected YouTube requirements from error message.`);
+              const ytCandidates = buildCandidatesForService("youtube", cleanProfId);
+              for (const yc of ytCandidates) {
+                if (!candidateInputs.some(c => JSON.stringify(c.metadata) === JSON.stringify(yc.metadata))) {
+                  candidateInputs.push(yc);
+                }
+              }
+            }
           } catch (candErr: any) {
             lastChannelError = candErr.message;
             console.warn(`[Buffer GraphQL] Fetch error for candidate on ${cleanProfId}:`, candErr.message);
