@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo } from "react";
 import { supabase } from "../lib/supabase";
 import { useConfirm } from "./ConfirmModal";
+import EditDestinationModal, { ScheduledCloneTarget, PublishingProfile } from "./EditDestinationModal";
 import { 
   Clock, Trash2, Play, CheckCircle2, XCircle, 
   Loader2, AlertTriangle, Sparkles, RefreshCw, ExternalLink, Pause,
@@ -33,17 +34,6 @@ interface ScheduledClone {
   created_at: string;
 }
 
-interface PublishingProfile {
-  id: string;
-  platform: "zernio" | "buffer";
-  service: string;
-  formatted_service: string;
-  service_username: string;
-  avatar?: string;
-  account_name?: string;
-  account_id?: string;
-}
-
 export default function QueueSchedulerPage() {
   const { confirm } = useConfirm();
   const [clones, setClones] = useState<ScheduledClone[]>([]);
@@ -55,6 +45,15 @@ export default function QueueSchedulerPage() {
   const [publishingProfiles, setPublishingProfiles] = useState<Record<string, PublishingProfile>>({});
   const [channelTargets, setChannelTargets] = useState<Record<string, any>>({});
   
+  // Destination Edit Modal State
+  const [destinationModalOpen, setDestinationModalOpen] = useState(false);
+  const [modalTargetItems, setModalTargetItems] = useState<ScheduledCloneTarget[]>([]);
+  const [modalChannelName, setModalChannelName] = useState<string | undefined>(undefined);
+  const [modalInitialPlatform, setModalInitialPlatform] = useState<string | undefined>(undefined);
+  const [modalInitialProfileId, setModalInitialProfileId] = useState<string | undefined>(undefined);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [destinationToast, setDestinationToast] = useState<string | null>(null);
+
   // View mode and channel collapse states
   const [viewMode, setViewMode] = useState<"grouped" | "flat">("grouped");
   const [openChannels, setOpenChannels] = useState<Record<string, boolean>>({});
@@ -320,6 +319,139 @@ export default function QueueSchedulerPage() {
       setClones((prev) => prev.filter((item) => !idsToDelete.includes(item.id)));
     } catch (err: any) {
       alert("فشل إلغاء جدولة القناة: " + err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Destination edit helpers
+  const handleOpenEditDestinationForSingle = (item: ScheduledClone) => {
+    setModalTargetItems([{
+      id: item.id,
+      video_title: item.video_title,
+      video_id: item.video_id,
+      thumbnail_url: item.thumbnail_url,
+      channel_name: getChannelName(item),
+      target_platform: item.target_platform,
+      target_profile_id: item.target_profile_id,
+    }]);
+    setModalChannelName(undefined);
+    setModalInitialPlatform(item.target_platform);
+    setModalInitialProfileId(item.target_profile_id);
+    setDestinationModalOpen(true);
+  };
+
+  const handleOpenEditDestinationForChannel = (chName: string, channelItems: ScheduledClone[]) => {
+    const activeItems = channelItems.filter(i => i.status !== "completed");
+    const targetItemsList = (activeItems.length > 0 ? activeItems : channelItems).map(item => ({
+      id: item.id,
+      video_title: item.video_title,
+      video_id: item.video_id,
+      thumbnail_url: item.thumbnail_url,
+      channel_name: chName,
+      target_platform: item.target_platform,
+      target_profile_id: item.target_profile_id,
+    }));
+
+    setModalTargetItems(targetItemsList);
+    setModalChannelName(chName);
+    const firstActive = targetItemsList[0];
+    setModalInitialPlatform(firstActive?.target_platform);
+    setModalInitialProfileId(firstActive?.target_profile_id);
+    setDestinationModalOpen(true);
+  };
+
+  const handleOpenEditDestinationForSelected = () => {
+    if (selectedIds.length === 0) return;
+    const selectedItems = clones.filter(c => selectedIds.includes(c.id));
+    setModalTargetItems(selectedItems.map(item => ({
+      id: item.id,
+      video_title: item.video_title,
+      video_id: item.video_id,
+      thumbnail_url: item.thumbnail_url,
+      channel_name: getChannelName(item),
+      target_platform: item.target_platform,
+      target_profile_id: item.target_profile_id,
+    })));
+    setModalChannelName(undefined);
+    if (selectedItems.length > 0) {
+      setModalInitialPlatform(selectedItems[0].target_platform);
+      setModalInitialProfileId(selectedItems[0].target_profile_id);
+    }
+    setDestinationModalOpen(true);
+  };
+
+  const handleToggleSelect = (id: string) => {
+    setSelectedIds(prev => 
+      prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]
+    );
+  };
+
+  const handleToggleSelectChannel = (channelItems: ScheduledClone[]) => {
+    const channelItemIds = channelItems.map(i => i.id);
+    const allSelected = channelItemIds.every(id => selectedIds.includes(id));
+    if (allSelected) {
+      setSelectedIds(prev => prev.filter(id => !channelItemIds.includes(id)));
+    } else {
+      setSelectedIds(prev => Array.from(new Set([...prev, ...channelItemIds])));
+    }
+  };
+
+  const handleSelectAllToggle = () => {
+    if (selectedIds.length === filteredClones.length && filteredClones.length > 0) {
+      setSelectedIds([]);
+    } else {
+      setSelectedIds(filteredClones.map(i => i.id));
+    }
+  };
+
+  const handleBatchPause = async () => {
+    if (selectedIds.length === 0) return;
+    setLoading(true);
+    try {
+      const { error } = await supabase.from("scheduled_clones").update({ status: "paused" }).in("id", selectedIds);
+      if (error) throw error;
+      setClones(prev => prev.map(c => selectedIds.includes(c.id) ? { ...c, status: "paused" } : c));
+    } catch (e: any) {
+      alert("فشل إيقاف الفيديوهات المحددة: " + e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBatchResume = async () => {
+    if (selectedIds.length === 0) return;
+    setLoading(true);
+    try {
+      const { error } = await supabase.from("scheduled_clones").update({ status: "pending" }).in("id", selectedIds);
+      if (error) throw error;
+      setClones(prev => prev.map(c => selectedIds.includes(c.id) ? { ...c, status: "pending" } : c));
+    } catch (e: any) {
+      alert("فشل استئناف الفيديوهات المحددة: " + e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleBatchDelete = async () => {
+    if (selectedIds.length === 0) return;
+    const isOk = await confirm({
+      title: "حذف الفيديوهات المحددة",
+      message: `هل أنت متأكد من رغبتك في حذف ${selectedIds.length} فيديو محدد من قائمة الجدولة نهائياً؟`,
+      confirmText: "حذف المحدد",
+      cancelText: "إلغاء",
+      variant: "danger",
+    });
+    if (!isOk) return;
+
+    setLoading(true);
+    try {
+      const { error } = await supabase.from("scheduled_clones").delete().in("id", selectedIds);
+      if (error) throw error;
+      setClones(prev => prev.filter(c => !selectedIds.includes(c.id)));
+      setSelectedIds([]);
+    } catch (e: any) {
+      alert("فشل حذف الفيديوهات: " + e.message);
     } finally {
       setLoading(false);
     }
@@ -608,11 +740,23 @@ export default function QueueSchedulerPage() {
     const isPending = item.status === "pending" || !item.status;
     const isEditingThis = editingId === item.id;
     const targetInfo = resolveTargetInfo(item);
+    const isSelected = selectedIds.includes(item.id);
 
     return (
-      <div key={`scheduler-item-${item.id}`} className="p-4 flex flex-col lg:flex-row gap-4 items-center justify-between text-right hover:bg-slate-50/50 transition-colors">
+      <div key={`scheduler-item-${item.id}`} className={`p-4 flex flex-col lg:flex-row gap-4 items-center justify-between text-right transition-colors ${
+        isSelected ? "bg-indigo-50/40 hover:bg-indigo-50/70" : "hover:bg-slate-50/50"
+      }`}>
         {/* Video Meta and details */}
         <div className="flex items-center gap-3.5 w-full lg:w-auto">
+          {/* Item Selection Checkbox */}
+          <input
+            type="checkbox"
+            checked={isSelected}
+            onChange={() => handleToggleSelect(item.id)}
+            className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 rounded-md border-slate-300 cursor-pointer shrink-0"
+            title="تحديد الفيديو"
+          />
+
           <div className="relative w-28 aspect-video rounded-xl overflow-hidden bg-slate-100 shrink-0 border border-slate-200">
             <img 
               src={item.thumbnail_url} 
@@ -632,9 +776,9 @@ export default function QueueSchedulerPage() {
               {item.video_title}
             </h5>
 
-            {/* Target Platform and Account Destination */}
+            {/* Target Platform and Account Destination with edit trigger */}
             <div className="flex items-center gap-1.5 flex-wrap">
-              <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-lg border text-[10px] font-bold shadow-2xs ${getPlatformBadgeStyle(targetInfo.service, targetInfo.platform)}`}>
+              <div className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-lg border text-[10px] font-bold shadow-2xs ${getPlatformBadgeStyle(targetInfo.service, targetInfo.platform)}`}>
                 {targetInfo.avatar ? (
                   <img 
                     src={targetInfo.avatar} 
@@ -647,12 +791,23 @@ export default function QueueSchedulerPage() {
                 )}
                 <span>{targetInfo.formatted_service}:</span>
                 <span className="font-mono" dir="ltr">@{targetInfo.service_username}</span>
-              </span>
-              {targetInfo.account_name && (
-                <span className="text-[9px] text-slate-400 font-medium">
-                  ({targetInfo.account_name})
-                </span>
-              )}
+                {targetInfo.account_name && (
+                  <span className="text-[9px] opacity-75 font-normal">
+                    ({targetInfo.account_name})
+                  </span>
+                )}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleOpenEditDestinationForSingle(item);
+                  }}
+                  className="mr-1 text-indigo-700 hover:text-indigo-900 bg-white/70 hover:bg-white p-0.5 rounded transition-all cursor-pointer"
+                  title="تعديل وجهة النشر والحساب لهذا الفيديو"
+                >
+                  <Edit3 className="w-2.5 h-2.5" />
+                </button>
+              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-1.5">
@@ -763,6 +918,16 @@ export default function QueueSchedulerPage() {
 
           {/* Operational Action buttons */}
           <div className="flex items-center gap-1.5">
+            {/* Edit Destination Button */}
+            <button
+              onClick={() => handleOpenEditDestinationForSingle(item)}
+              disabled={actionId === item.id || item.status === "completed"}
+              className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 rounded-xl transition-colors cursor-pointer"
+              title="تعديل وجهة النشر والحساب لهذا الفيديو"
+            >
+              <Globe className="w-4 h-4 text-indigo-600" />
+            </button>
+
             {isPending && (
               <>
                 <button
@@ -1083,28 +1248,56 @@ export default function QueueSchedulerPage() {
           <Search className="w-4 h-4 text-slate-400 absolute right-3.5 top-3.5" />
         </div>
 
-        {/* View Mode & Expand Controls */}
+        {/* Destination Toast Notice */}
+        {destinationToast && (
+          <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl text-xs font-bold flex items-center justify-between gap-2 animate-slide-down">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+              <span>{destinationToast}</span>
+            </div>
+            <button
+              onClick={() => setDestinationToast(null)}
+              className="text-emerald-700 hover:text-emerald-900 font-extrabold text-sm px-2 cursor-pointer"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* View Mode, Select All & Expand Controls */}
         {filteredClones.length > 0 && (
           <div className="flex flex-col sm:flex-row items-center justify-between gap-3 bg-slate-50 p-2.5 rounded-2xl border border-slate-100 text-xs">
-            <div className="flex items-center gap-1 bg-slate-200/70 p-1 rounded-xl w-full sm:w-auto">
-              <button
-                onClick={() => setViewMode("grouped")}
-                className={`flex-1 sm:flex-none px-3.5 py-1.5 rounded-lg font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs ${
-                  viewMode === "grouped" ? "bg-indigo-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
-                }`}
-              >
-                <Layers className="w-3.5 h-3.5" />
-                <span>مجمعة حسب القنوات ({Object.keys(groupedClones).length})</span>
-              </button>
-              <button
-                onClick={() => setViewMode("flat")}
-                className={`flex-1 sm:flex-none px-3.5 py-1.5 rounded-lg font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs ${
-                  viewMode === "flat" ? "bg-indigo-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
-                }`}
-              >
-                <ListFilter className="w-3.5 h-3.5" />
-                <span>قائمة شاملة ({filteredClones.length})</span>
-              </button>
+            <div className="flex items-center gap-2 w-full sm:w-auto">
+              <label className="flex items-center gap-2 bg-white px-3 py-1.5 rounded-xl border border-slate-200 cursor-pointer text-slate-700 font-bold text-xs select-none">
+                <input
+                  type="checkbox"
+                  checked={filteredClones.length > 0 && selectedIds.length === filteredClones.length}
+                  onChange={handleSelectAllToggle}
+                  className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 rounded-md border-slate-300 cursor-pointer"
+                />
+                <span>تحديد الكل ({filteredClones.length})</span>
+              </label>
+
+              <div className="flex items-center gap-1 bg-slate-200/70 p-1 rounded-xl">
+                <button
+                  onClick={() => setViewMode("grouped")}
+                  className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs ${
+                    viewMode === "grouped" ? "bg-indigo-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <Layers className="w-3.5 h-3.5" />
+                  <span>مجمعة حسب القنوات ({Object.keys(groupedClones).length})</span>
+                </button>
+                <button
+                  onClick={() => setViewMode("flat")}
+                  className={`px-3 py-1 rounded-lg font-bold transition-all cursor-pointer flex items-center justify-center gap-1.5 text-xs ${
+                    viewMode === "flat" ? "bg-indigo-600 text-white shadow-xs" : "text-slate-600 hover:text-slate-900"
+                  }`}
+                >
+                  <ListFilter className="w-3.5 h-3.5" />
+                  <span>قائمة شاملة</span>
+                </button>
+              </div>
             </div>
 
             {viewMode === "grouped" && (
@@ -1123,6 +1316,64 @@ export default function QueueSchedulerPage() {
                 </button>
               </div>
             )}
+          </div>
+        )}
+
+        {/* Floating Batch Actions Bar */}
+        {selectedIds.length > 0 && (
+          <div className="sticky top-4 z-30 bg-slate-900 text-white p-3.5 rounded-2xl shadow-xl flex flex-wrap items-center justify-between gap-3 border border-slate-700 animate-slide-down">
+            <div className="flex items-center gap-2.5">
+              <span className="w-3 h-3 rounded-full bg-indigo-400 animate-pulse"></span>
+              <span className="text-xs font-bold">
+                تم تحديد <span className="text-indigo-300 font-extrabold text-sm px-1">{selectedIds.length}</span> فيديو
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleOpenEditDestinationForSelected}
+                className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+              >
+                <Globe className="w-3.5 h-3.5" />
+                <span>تعديل وجهة النشر والحساب ({selectedIds.length})</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleBatchPause}
+                className="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+              >
+                <Pause className="w-3.5 h-3.5" />
+                <span>إيقاف مؤقت</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleBatchResume}
+                className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+              >
+                <Play className="w-3.5 h-3.5" />
+                <span>استئناف</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={handleBatchDelete}
+                className="px-3 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-xl flex items-center gap-1.5 shadow-xs transition-all cursor-pointer"
+              >
+                <Trash className="w-3.5 h-3.5" />
+                <span>حذف المحدد</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSelectedIds([])}
+                className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-bold rounded-xl transition-all cursor-pointer"
+              >
+                إلغاء التحديد ✕
+              </button>
+            </div>
           </div>
         )}
 
@@ -1154,6 +1405,7 @@ export default function QueueSchedulerPage() {
               const chCompleted = channelItems.filter(i => i.status === "completed").length;
               const chFailed = channelItems.filter(i => i.status === "failed").length;
               const channelTargetsList = getChannelTargetsSummary(channelItems);
+              const isChannelAllSelected = channelItems.length > 0 && channelItems.every(i => selectedIds.includes(i.id));
 
               return (
                 <div key={`channel-group-${chName}`} className="border border-indigo-100/80 rounded-2xl overflow-hidden bg-white shadow-xs transition-all">
@@ -1163,6 +1415,16 @@ export default function QueueSchedulerPage() {
                     className="p-4 bg-gradient-to-r from-indigo-50/50 via-slate-50 to-indigo-50/30 hover:bg-indigo-50/70 cursor-pointer flex flex-col md:flex-row items-center justify-between gap-3 border-b border-slate-150 select-none transition-colors"
                   >
                     <div className="flex items-center gap-3 w-full md:w-auto">
+                      {/* Channel Multi-select Checkbox */}
+                      <input
+                        type="checkbox"
+                        checked={isChannelAllSelected}
+                        onChange={() => handleToggleSelectChannel(channelItems)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 rounded-md border-slate-300 cursor-pointer shrink-0"
+                        title="تحديد كافة فيديوهات هذه القناة"
+                      />
+
                       <div className="p-2.5 bg-indigo-600 text-white rounded-xl shadow-xs shrink-0 flex items-center justify-center">
                         <Tv className="w-5 h-5" />
                       </div>
@@ -1233,6 +1495,20 @@ export default function QueueSchedulerPage() {
                     </div>
 
                     <div className="flex flex-wrap items-center gap-1.5 w-full md:w-auto justify-between md:justify-end shrink-0 pt-2 md:pt-0 border-t md:border-0 border-slate-200/60">
+                      {/* Edit Destination Button for Channel */}
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleOpenEditDestinationForChannel(chName, channelItems);
+                        }}
+                        className="px-2.5 py-1.5 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200 text-xs font-bold rounded-xl transition-all flex items-center gap-1 shadow-2xs cursor-pointer"
+                        title="تعديل وجهة النشر والحساب لجميع فيديوهات هذه القناة"
+                      >
+                        <Globe className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>تعديل وجهة النشر</span>
+                      </button>
+
                       {chPending > 0 && (
                         <button
                           type="button"
@@ -1328,6 +1604,15 @@ export default function QueueSchedulerPage() {
                               </div>
                             </div>
                           ))}
+
+                          <button
+                            type="button"
+                            onClick={() => handleOpenEditDestinationForChannel(chName, channelItems)}
+                            className="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer mr-1"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                            <span>تغيير وجهة النشر والحساب</span>
+                          </button>
                         </div>
                       </div>
 
@@ -1347,6 +1632,24 @@ export default function QueueSchedulerPage() {
           </div>
         )}
       </div>
+
+      {/* Edit Destination Modal */}
+      <EditDestinationModal
+        isOpen={destinationModalOpen}
+        onClose={() => setDestinationModalOpen(false)}
+        targetItems={modalTargetItems}
+        channelName={modalChannelName}
+        publishingProfiles={publishingProfiles}
+        initialPlatform={modalInitialPlatform}
+        initialProfileId={modalInitialProfileId}
+        onSaved={({ updatedCount }) => {
+          fetchQueue();
+          fetchProfiles();
+          setSelectedIds([]);
+          setDestinationToast(`تم تحديث وجهة النشر والحساب بنجاح لـ ${updatedCount} فيديو!`);
+          setTimeout(() => setDestinationToast(null), 5000);
+        }}
+      />
     </div>
   );
 }

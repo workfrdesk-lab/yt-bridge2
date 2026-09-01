@@ -4756,6 +4756,9 @@ async function fetchProfilesWithGraphQL(cleanToken: string): Promise<any[]> {
         }
       }`;
 
+      const ctrl1 = new AbortController();
+      const t1 = setTimeout(() => ctrl1.abort(), 5000);
+
       const orgRes = await fetch(url, {
         method: "POST",
         headers: {
@@ -4763,7 +4766,9 @@ async function fetchProfilesWithGraphQL(cleanToken: string): Promise<any[]> {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({ query: orgQuery }),
+        signal: ctrl1.signal
       });
+      clearTimeout(t1);
 
       if (!orgRes.ok) {
         throw new Error(`HTTP ${orgRes.status}`);
@@ -4798,6 +4803,9 @@ async function fetchProfilesWithGraphQL(cleanToken: string): Promise<any[]> {
           }
         }`;
 
+        const ctrl2 = new AbortController();
+        const t2 = setTimeout(() => ctrl2.abort(), 5000);
+
         const channelsRes = await fetch(url, {
           method: "POST",
           headers: {
@@ -4812,7 +4820,9 @@ async function fetchProfilesWithGraphQL(cleanToken: string): Promise<any[]> {
               }
             }
           }),
+          signal: ctrl2.signal
         });
+        clearTimeout(t2);
 
         if (!channelsRes.ok) {
           console.warn(`[Buffer GraphQL] Failed to fetch channels for org ${org.id}: HTTP ${channelsRes.status}`);
@@ -8037,6 +8047,7 @@ app.post("/api/db/zernio_accounts", async (req, res) => {
       "INSERT INTO zernio_accounts (id, user_id, name, api_key, webhook_url) VALUES ($1, $2, $3, $4, $5)",
       [id, user_id, name, api_key, webhook_url || null]
     );
+    publishingProfilesCache = null;
     return res.json({ id, user_id, name, api_key, webhook_url });
   } catch (err: any) {
     console.error("[DB] insert zernio_account error:", err.message);
@@ -8057,6 +8068,7 @@ app.delete("/api/db/zernio_accounts", async (req, res) => {
   try {
     const p = getDbPool();
     await p.query("DELETE FROM zernio_accounts WHERE id = $1", [id]);
+    publishingProfilesCache = null;
     return res.json({ success: true });
   } catch (err: any) {
     console.error("[DB] delete zernio_account error:", err.message);
@@ -8114,6 +8126,7 @@ app.post("/api/db/buffer_accounts", async (req, res) => {
       "INSERT INTO buffer_accounts (id, user_id, name, access_token) VALUES ($1, $2, $3, $4)",
       [id, user_id, name, access_token]
     );
+    publishingProfilesCache = null;
     return res.json({ id, user_id, name, access_token });
   } catch (err: any) {
     console.error("[DB] insert buffer_account error:", err.message);
@@ -8134,6 +8147,7 @@ app.delete("/api/db/buffer_accounts", async (req, res) => {
   try {
     const p = getDbPool();
     await p.query("DELETE FROM buffer_accounts WHERE id = $1", [id]);
+    publishingProfilesCache = null;
     return res.json({ success: true });
   } catch (err: any) {
     console.error("[DB] delete buffer_account error:", err.message);
@@ -8439,6 +8453,10 @@ app.put("/api/db/scheduled_clones", async (req, res) => {
       updates.push(`target_profile_id = $${idx++}`);
       values.push(target_profile_id);
     }
+    if (req.body.target_access_token !== undefined) {
+      updates.push(`target_access_token = $${idx++}`);
+      values.push(req.body.target_access_token);
+    }
     if (bypass_settings !== undefined) {
       updates.push(`bypass_settings = $${idx++}`);
       values.push(typeof bypass_settings === "object" ? JSON.stringify(bypass_settings) : bypass_settings);
@@ -8453,6 +8471,111 @@ app.put("/api/db/scheduled_clones", async (req, res) => {
   } catch (err: any) {
     console.error("[DB] update scheduled_clone error:", err.message);
     res.status(500).json({ error: `فشل تحديث الفيديو المجدول في PostgreSQL: ${err.message}` });
+  }
+});
+
+// Dedicated endpoint to safely update publishing destination & account for single or multiple scheduled items
+app.post("/api/scheduled-clones/update-destination", async (req, res) => {
+  const { ids, channel_name, target_platform, target_profile_id, account_id, update_channel_default } = req.body;
+
+  if (!target_platform || !target_profile_id) {
+    return res.status(400).json({ error: "منصة النشر ومعرف الحساب مطلوبان." });
+  }
+
+  if (!(await ensureDbConnected())) {
+    return res.status(500).json({ error: `قاعدة بيانات PostgreSQL غير متصلة: ${pgInitError}` });
+  }
+
+  try {
+    const p = getDbPool();
+    let target_access_token = "";
+
+    if (target_platform === "zernio") {
+      let zAcc: any = null;
+      if (account_id) {
+        const r = await p.query("SELECT * FROM zernio_accounts WHERE id = $1", [account_id]);
+        if (r.rows.length > 0) zAcc = r.rows[0];
+      }
+
+      if (target_profile_id === "WEBHOOK_MODE") {
+        if (!zAcc || !zAcc.webhook_url) {
+          const r = await p.query("SELECT * FROM zernio_accounts WHERE webhook_url IS NOT NULL AND webhook_url != '' ORDER BY created_at DESC LIMIT 1");
+          if (r.rows.length > 0) zAcc = r.rows[0];
+        }
+        target_access_token = zAcc?.webhook_url || "";
+      } else {
+        if (!zAcc || !zAcc.api_key) {
+          // If no specific account was passed or found, look up all zernio accounts
+          const r = await p.query("SELECT * FROM zernio_accounts WHERE api_key IS NOT NULL AND api_key != '' ORDER BY created_at DESC");
+          if (r.rows.length > 0) {
+            zAcc = r.rows[0];
+          }
+        }
+        target_access_token = zAcc?.api_key || "";
+      }
+    } else if (target_platform === "buffer") {
+      let bAcc: any = null;
+      if (account_id) {
+        const r = await p.query("SELECT * FROM buffer_accounts WHERE id = $1", [account_id]);
+        if (r.rows.length > 0) bAcc = r.rows[0];
+      }
+      if (!bAcc || !bAcc.access_token) {
+        const r = await p.query("SELECT * FROM buffer_accounts WHERE access_token IS NOT NULL AND access_token != '' ORDER BY created_at DESC LIMIT 1");
+        if (r.rows.length > 0) bAcc = r.rows[0];
+      }
+      target_access_token = bAcc?.access_token || "";
+    }
+
+    let updatedCount = 0;
+
+    if (Array.isArray(ids) && ids.length > 0) {
+      const updateResult = await p.query(
+        "UPDATE scheduled_clones SET target_platform = $1, target_profile_id = $2, target_access_token = $3 WHERE id = ANY($4::varchar[])",
+        [target_platform, target_profile_id, target_access_token, ids]
+      );
+      updatedCount = updateResult.rowCount || 0;
+    } else if (channel_name) {
+      const updateResult = await p.query(
+        "UPDATE scheduled_clones SET target_platform = $1, target_profile_id = $2, target_access_token = $3 WHERE channel_name = $4 AND status IN ('pending', 'paused', 'failed')",
+        [target_platform, target_profile_id, target_access_token, channel_name]
+      );
+      updatedCount = updateResult.rowCount || 0;
+    } else {
+      return res.status(400).json({ error: "يجب تحديد قائمة المعرفات (ids) أو اسم القناة (channel_name)." });
+    }
+
+    // If requested, also update the default destination for tracked channels
+    if (update_channel_default && channel_name) {
+      try {
+        if (target_platform === "zernio") {
+          await p.query(
+            "UPDATE tracked_channels SET platform = 'zernio', zernio_profile_id = $1 WHERE channel_name = $2",
+            [target_profile_id, channel_name]
+          );
+        } else if (target_platform === "buffer") {
+          await p.query(
+            "UPDATE tracked_channels SET platform = 'buffer', buffer_profile_id = $1 WHERE channel_name = $2",
+            [target_profile_id, channel_name]
+          );
+        }
+      } catch (e: any) {
+        console.warn("[DB] Note updating tracked_channels default:", e.message);
+      }
+    }
+
+    // Invalidate publishing profiles cache to reflect immediately
+    publishingProfilesCache = null;
+
+    return res.json({
+      success: true,
+      updatedCount,
+      target_platform,
+      target_profile_id,
+      hasAccessToken: !!target_access_token
+    });
+  } catch (err: any) {
+    console.error("[DB] update-destination error:", err.message);
+    res.status(500).json({ error: `فشل تحديث وجهة النشر والحساب: ${err.message}` });
   }
 });
 
@@ -8923,10 +9046,11 @@ app.get("/api/caption-templates/preview-video", (req, res) => {
 
 // Cache for publishing profiles
 let publishingProfilesCache: { data: any; timestamp: number } | null = null;
-const PROFILES_CACHE_TTL = 45 * 1000; // 45 seconds
+const PROFILES_CACHE_TTL = 30 * 1000; // 30 seconds
 
 app.get(["/api/db/publishing_profiles", "/api/publishing-profiles"], async (req, res) => {
-  if (publishingProfilesCache && Date.now() - publishingProfilesCache.timestamp < PROFILES_CACHE_TTL) {
+  const isFresh = req.query.fresh === "true" || req.query.force === "true";
+  if (!isFresh && publishingProfilesCache && Date.now() - publishingProfilesCache.timestamp < PROFILES_CACHE_TTL) {
     return res.json(publishingProfilesCache.data);
   }
 
@@ -8952,10 +9076,11 @@ app.get(["/api/db/publishing_profiles", "/api/publishing-profiles"], async (req,
     // 1. Fetch Zernio accounts & profiles
     const zAccounts = await p.query("SELECT * FROM zernio_accounts");
     for (const zAcc of zAccounts.rows) {
-      if (zAcc.api_key && zAcc.api_key.trim()) {
+      let foundZProfiles = false;
+      if (zAcc.api_key && zAcc.api_key.trim() && zAcc.api_key !== "WEBHOOK_MODE") {
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 6000);
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
           const resp = await fetch("https://zernio.com/api/v1/accounts", {
             headers: {
               "Authorization": `Bearer ${zAcc.api_key.trim()}`,
@@ -8966,23 +9091,28 @@ app.get(["/api/db/publishing_profiles", "/api/publishing-profiles"], async (req,
           clearTimeout(timeoutId);
           if (resp.ok) {
             const data = await resp.json();
-            for (const acc of (data.accounts || [])) {
-              profileMap[acc._id] = {
-                id: acc._id,
-                platform: "zernio",
-                service: acc.platform || "social",
-                formatted_service: formatPlatformLabel(acc.platform),
-                service_username: acc.username || acc.displayName || acc.name || "حساب Zernio",
-                avatar: acc.profilePicture || "",
-                account_name: zAcc.name || "Zernio",
-                account_id: zAcc.id
-              };
+            const accounts = data.accounts || [];
+            if (Array.isArray(accounts) && accounts.length > 0) {
+              for (const acc of accounts) {
+                profileMap[acc._id] = {
+                  id: acc._id,
+                  platform: "zernio",
+                  service: acc.platform || "social",
+                  formatted_service: formatPlatformLabel(acc.platform),
+                  service_username: acc.username || acc.displayName || acc.name || "حساب Zernio",
+                  avatar: acc.profilePicture || "",
+                  account_name: zAcc.name || "Zernio",
+                  account_id: zAcc.id
+                };
+                foundZProfiles = true;
+              }
             }
           }
         } catch (e: any) {
           console.warn(`[Profiles] Error fetching zernio profiles for ${zAcc.name}:`, e.message);
         }
       }
+
       if (zAcc.webhook_url) {
         profileMap[zAcc.id] = {
           id: zAcc.id,
@@ -8994,24 +9124,69 @@ app.get(["/api/db/publishing_profiles", "/api/publishing-profiles"], async (req,
           account_name: zAcc.name,
           account_id: zAcc.id
         };
+        foundZProfiles = true;
+      }
+
+      // Fallback for Zernio account if no individual social accounts were returned
+      if (!foundZProfiles && zAcc.api_key && zAcc.api_key !== "WEBHOOK_MODE") {
+        profileMap[zAcc.id] = {
+          id: zAcc.id,
+          platform: "zernio",
+          service: "zernio",
+          formatted_service: "حساب Zernio API ⚡",
+          service_username: zAcc.name || "حساب Zernio الرئيسي",
+          avatar: "",
+          account_name: zAcc.name || "Zernio",
+          account_id: zAcc.id
+        };
       }
     }
 
-    // 2. Fetch Buffer accounts & profiles
+    // 2. Fetch Buffer accounts & profiles (REST + GraphQL + Account Fallback)
     const bAccounts = await p.query("SELECT * FROM buffer_accounts");
     for (const bAcc of bAccounts.rows) {
-      if (bAcc.access_token && bAcc.access_token.trim()) {
+      let foundBProfiles = false;
+      const cleanToken = (bAcc.access_token || "").trim();
+
+      if (cleanToken) {
+        // Step A: Try Buffer REST API first
         try {
           const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 6000);
-          const resp = await fetch(`https://api.bufferapp.com/1/profiles.json?access_token=${bAcc.access_token.trim()}`, {
+          const timeoutId = setTimeout(() => controller.abort(), 4000);
+          const resp = await fetch(`https://api.bufferapp.com/1/profiles.json?access_token=${cleanToken}`, {
             signal: controller.signal
           });
           clearTimeout(timeoutId);
+
           if (resp.ok) {
             const data = await resp.json();
-            if (Array.isArray(data)) {
+            if (Array.isArray(data) && data.length > 0) {
               for (const prof of data) {
+                profileMap[prof.id] = {
+                  id: prof.id,
+                  platform: "buffer",
+                  service: prof.service || "social",
+                  formatted_service: prof.formatted_service || formatPlatformLabel(prof.service),
+                  service_username: prof.service_username || prof.username || "حساب Buffer",
+                  avatar: prof.avatar || prof.avatar_https || "",
+                  account_name: bAcc.name || "Buffer",
+                  account_id: bAcc.id
+                };
+                foundBProfiles = true;
+              }
+            }
+          }
+        } catch (e: any) {
+          console.warn(`[Profiles] REST fetch error for ${bAcc.name}:`, e.message);
+        }
+
+        // Step B: If REST API returned 0 profiles or was rejected, try Buffer GraphQL API!
+        if (!foundBProfiles) {
+          try {
+            console.log(`[Profiles] Querying Buffer GraphQL for account "${bAcc.name}"...`);
+            const gqlProfiles = await fetchProfilesWithGraphQL(cleanToken);
+            if (Array.isArray(gqlProfiles) && gqlProfiles.length > 0) {
+              for (const prof of gqlProfiles) {
                 profileMap[prof.id] = {
                   id: prof.id,
                   platform: "buffer",
@@ -9022,12 +9197,28 @@ app.get(["/api/db/publishing_profiles", "/api/publishing-profiles"], async (req,
                   account_name: bAcc.name || "Buffer",
                   account_id: bAcc.id
                 };
+                foundBProfiles = true;
               }
             }
+          } catch (gqlErr: any) {
+            console.warn(`[Profiles] GraphQL fetch error for ${bAcc.name}:`, gqlErr.message);
           }
-        } catch (e: any) {
-          console.warn(`[Profiles] Error fetching buffer profiles for ${bAcc.name}:`, e.message);
         }
+      }
+
+      // Step C: ALWAYS ensure the Buffer account itself is registered as a fallback profile
+      // so it immediately appears in the UI and can be selected even without sub-channels
+      if (!foundBProfiles) {
+        profileMap[bAcc.id] = {
+          id: bAcc.id,
+          platform: "buffer",
+          service: "buffer",
+          formatted_service: "حساب Buffer 🌐",
+          service_username: bAcc.name || "حساب Buffer الرئيسي",
+          avatar: "",
+          account_name: bAcc.name || "Buffer",
+          account_id: bAcc.id
+        };
       }
     }
 
