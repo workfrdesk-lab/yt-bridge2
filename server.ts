@@ -4985,6 +4985,7 @@ async function fetchProfilesWithGraphQL(cleanToken: string): Promise<any[]> {
 
 /**
  * Robust helper to publish a post using the Buffer GraphQL API.
+ * Automatically injects required platform metadata for Facebook (reel/post), Instagram, etc.
  */
 async function publishWithGraphQL(cleanToken: string, profileIds: string[], text: string, media: any, now: boolean): Promise<any> {
   const graphqlUrls = [
@@ -5035,6 +5036,54 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
     ];
   }
 
+  // Pre-fetch channel services if possible to know exact metadata requirements upfront
+  const serviceMap: Record<string, string> = {};
+  try {
+    const profs = await fetchProfilesWithGraphQL(cleanToken);
+    if (Array.isArray(profs)) {
+      for (const p of profs) {
+        if (p.id) {
+          serviceMap[p.id] = (p.service || "").toLowerCase();
+        }
+      }
+    }
+  } catch (mapErr: any) {
+    console.log("[Buffer GraphQL] Channel service map prefetch skipped:", mapErr.message);
+  }
+
+  const query = `mutation CreatePost($input: CreatePostInput!) {
+    createPost(input: $input) {
+      __typename
+      ... on PostActionSuccess {
+        post {
+          id
+          status
+        }
+      }
+      ... on MutationError {
+        message
+      }
+      ... on NotFoundError {
+        message
+      }
+      ... on UnauthorizedError {
+        message
+      }
+      ... on UnexpectedError {
+        message
+      }
+      ... on RestProxyError {
+        message
+      }
+      ... on LimitReachedError {
+        message
+      }
+      ... on InvalidInputError {
+        message
+      }
+    }
+  }`;
+
   let lastError: any = null;
   const results: any[] = [];
 
@@ -5046,110 +5095,155 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
         const cleanProfId = (profileId || "").trim();
         if (!cleanProfId) continue;
 
-        const input = {
-          ...baseInput,
-          channelId: cleanProfId
-        };
+        const knownService = serviceMap[cleanProfId] || "";
+        console.log(`[Buffer GraphQL] Publishing for channel ${cleanProfId} (service: "${knownService || 'unknown'}")...`);
 
-        const query = `mutation CreatePost($input: CreatePostInput!) {
-          createPost(input: $input) {
-            __typename
-            ... on PostActionSuccess {
-              post {
-                id
-                status
-              }
-            }
-            ... on MutationError {
-              message
-            }
-            ... on NotFoundError {
-              message
-            }
-            ... on UnauthorizedError {
-              message
-            }
-            ... on UnexpectedError {
-              message
-            }
-            ... on RestProxyError {
-              message
-            }
-            ... on LimitReachedError {
-              message
-            }
-            ... on InvalidInputError {
-              message
-            }
-          }
-        }`;
+        // Build candidate inputs ordered by likelihood of success for this service
+        const candidateInputs: any[] = [];
 
-        console.log(`[Buffer GraphQL] Publishing for channel ${cleanProfId}...`);
-        let res = await fetch(url, {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${cleanToken}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({ query, variables: { input } }),
-        });
-
-        let body: any = null;
-        if (res.ok) {
-          body = await res.json();
-        }
-
-        // Retry with asset as an object instead of array if needed
-        if (!res.ok || (body?.errors && body.errors.length > 0)) {
-          if (videoUrl || photoUrl) {
-            const altInput: any = {
+        if (knownService === "facebook" || knownService.includes("facebook")) {
+          if (videoUrl) {
+            candidateInputs.push({
               ...baseInput,
               channelId: cleanProfId,
-              assets: videoUrl ? { video: { url: videoUrl } } : { image: { url: photoUrl } }
-            };
-            try {
-              const altRes = await fetch(url, {
-                method: "POST",
-                headers: {
-                  "Authorization": `Bearer ${cleanToken}`,
-                  "Content-Type": "application/json",
-                },
-                body: JSON.stringify({ query, variables: { input: altInput } }),
-              });
-              if (altRes.ok) {
-                const altBody = await altRes.json();
-                if (!altBody.errors || altBody.errors.length === 0) {
-                  res = altRes;
-                  body = altBody;
-                }
-              }
-            } catch (altErr) {
-              // Ignore alt error and proceed
-            }
+              metadata: { facebook: { type: "reel" } }
+            });
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { facebook: { type: "post" } }
+            });
+          } else {
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { facebook: { type: "post" } }
+            });
+          }
+        } else if (knownService === "instagram" || knownService.includes("instagram")) {
+          if (videoUrl) {
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { instagram: { type: "reel", shouldShareToFeed: true } }
+            });
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { instagram: { type: "post" } }
+            });
+          } else {
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { instagram: { type: "post" } }
+            });
+          }
+        } else if (knownService === "tiktok" || knownService.includes("tiktok")) {
+          candidateInputs.push({
+            ...baseInput,
+            channelId: cleanProfId,
+            metadata: { tiktok: {} }
+          });
+          candidateInputs.push({
+            ...baseInput,
+            channelId: cleanProfId
+          });
+        } else {
+          // If unknown, prepare smart fallback sequence:
+          // 1. Try with Facebook Reel (if video) or Facebook Post (if not)
+          // 2. Try default without metadata
+          // 3. Try Facebook Post
+          // 4. Try Instagram Reel
+          if (videoUrl) {
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { facebook: { type: "reel" } }
+            });
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId
+            });
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { facebook: { type: "post" } }
+            });
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { instagram: { type: "reel", shouldShareToFeed: true } }
+            });
+          } else {
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { facebook: { type: "post" } }
+            });
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId
+            });
+            candidateInputs.push({
+              ...baseInput,
+              channelId: cleanProfId,
+              metadata: { instagram: { type: "post" } }
+            });
           }
         }
 
-        if (!res.ok) {
-          throw new Error(`Buffer GraphQL HTTP ${res.status}`);
+        let channelSuccess = false;
+        let lastChannelError = "";
+
+        for (const inputCandidate of candidateInputs) {
+          try {
+            console.log(`[Buffer GraphQL] Trying candidate for channel ${cleanProfId} with metadata:`, JSON.stringify(inputCandidate.metadata || {}));
+            const res = await fetch(url, {
+              method: "POST",
+              headers: {
+                "Authorization": `Bearer ${cleanToken}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ query, variables: { input: inputCandidate } }),
+            });
+
+            if (!res.ok) {
+              lastChannelError = `HTTP ${res.status}`;
+              continue;
+            }
+
+            const body = await res.json();
+            if (body.errors && body.errors.length > 0) {
+              lastChannelError = body.errors[0].message;
+              console.warn(`[Buffer GraphQL] GraphQL errors for ${cleanProfId}:`, body.errors[0].message);
+              continue;
+            }
+
+            const payload = body.data?.createPost;
+            if (!payload) {
+              lastChannelError = "لا توجد استجابة من الخادم";
+              continue;
+            }
+
+            if (payload.__typename === "PostActionSuccess") {
+              console.log(`[Buffer GraphQL] Successfully published to ${cleanProfId}: ${payload.post?.id}`);
+              results.push({ profileId: cleanProfId, success: true, postId: payload.post?.id });
+              channelSuccess = true;
+              break;
+            }
+
+            const errMsg = payload.message || `خطأ (${payload.__typename})`;
+            lastChannelError = errMsg;
+            console.warn(`[Buffer GraphQL] Candidate rejected for ${cleanProfId}: ${errMsg}`);
+          } catch (candErr: any) {
+            lastChannelError = candErr.message;
+            console.warn(`[Buffer GraphQL] Fetch error for candidate on ${cleanProfId}:`, candErr.message);
+          }
         }
 
-        if (body.errors && body.errors.length > 0) {
-          throw new Error(body.errors[0].message);
-        }
-
-        const payload = body.data?.createPost;
-        if (!payload) {
-          throw new Error("لم يتم إرجاع أي نتيجة من Buffer.");
-        }
-
-        const typename = payload.__typename;
-        if (typename === "PostActionSuccess") {
-          console.log(`[Buffer GraphQL] Successfully published to ${cleanProfId}: ${payload.post?.id}`);
-          results.push({ profileId: cleanProfId, success: true, postId: payload.post?.id });
-        } else {
-          const errMsg = payload.message || `خطأ (${typename})`;
-          console.warn(`[Buffer GraphQL] Error publishing to ${cleanProfId}: ${errMsg}`);
-          results.push({ profileId: cleanProfId, success: false, error: errMsg });
+        if (!channelSuccess) {
+          results.push({ profileId: cleanProfId, success: false, error: lastChannelError || "فشلت عملية النشر على الحساب." });
         }
       }
 
