@@ -77,9 +77,19 @@ export function ScheduledClonesQueue() {
   const fetchQueue = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase.from("scheduled_clones").select("*");
-      if (error) throw error;
-      setClones(data || []);
+      const { data: { user } } = await supabase.auth.getUser();
+      if (user) {
+        const isUserAdmin = user.email?.toLowerCase() === "aamaanaah22@gmail.com" || user.role === "admin";
+        let query = supabase.from("scheduled_clones").select("*");
+        if (!isUserAdmin) {
+          query = query.eq("user_id", user.id);
+        }
+        const { data, error } = await query;
+        if (error) throw error;
+        setClones(data || []);
+      } else {
+        setClones([]);
+      }
       setError(null);
       fetchProfiles();
     } catch (err: any) {
@@ -549,9 +559,9 @@ export function ScheduledClonesQueue() {
         </div>
 
         {/* Status & Actions */}
-        <div className="flex items-center gap-3 w-full md:w-auto justify-between md:justify-end shrink-0 pt-2 md:pt-0 border-t md:border-0 border-slate-100">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full md:w-auto justify-between md:justify-end shrink-0 pt-2 md:pt-0 border-t md:border-0 border-slate-100">
           {/* Status Badge */}
-          <div className="flex flex-col items-end gap-1">
+          <div className="flex flex-row sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-1">
             {item.status === "paused" && (
               <span className="text-[10px] font-bold text-slate-700 bg-slate-100 border border-slate-200 px-2.5 py-1 rounded-lg flex items-center gap-1">
                 <Pause className="w-3 h-3" />
@@ -591,7 +601,7 @@ export function ScheduledClonesQueue() {
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5 justify-end">
             {item.status === "failed" && (
               <button
                 onClick={() => handleRetry(item.id)}

@@ -13,12 +13,24 @@ export const isSupabaseConfigured = (): boolean => {
 // Helper to make backend requests
 const apiRequest = async (path: string, method = "GET", body?: any) => {
   try {
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-cache"
+    };
+
+    try {
+      const stored = localStorage.getItem("pg_session_user");
+      if (stored) {
+        const u = JSON.parse(stored);
+        if (u?.id) {
+          headers["x-user-id"] = u.id;
+        }
+      }
+    } catch {}
+
     const res = await fetch(path, {
       method,
-      headers: {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache"
-      },
+      headers,
       cache: "no-store",
       body: body ? JSON.stringify(body) : undefined
     });

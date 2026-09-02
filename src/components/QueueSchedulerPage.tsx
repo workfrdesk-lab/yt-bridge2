@@ -62,12 +62,27 @@ export default function QueueSchedulerPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "pending" | "paused" | "processing" | "completed" | "failed">("all");
   
+  // Auth and User Isolation State
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [isAdminUser, setIsAdminUser] = useState(false);
+  const [viewScope, setViewScope] = useState<"mine" | "all">("mine");
+
   // Spacing Organizer State
   const [startDatetime, setStartDatetime] = useState("");
-  const [spacingMinutes, setSpacingMinutes] = useState(20);
+  const [spacingSelection, setSpacingSelection] = useState<string>("20"); // presets in mins or 'custom_hours'
+  const [customHours, setCustomHours] = useState<number>(2);
   const [enableJitter, setEnableJitter] = useState(true);
   const [isOrganizing, setIsOrganizing] = useState(false);
   const [organizeSuccess, setOrganizeSuccess] = useState(false);
+
+  // Calculate effective spacing in minutes
+  const effectiveSpacingMinutes = useMemo(() => {
+    if (spacingSelection === "custom_hours") {
+      const hrs = Number(customHours) || 1;
+      return Math.max(1, Math.round(hrs * 60));
+    }
+    return Number(spacingSelection) || 20;
+  }, [spacingSelection, customHours]);
 
   // Inline edit state for individual items
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -93,9 +108,25 @@ export default function QueueSchedulerPage() {
   const fetchQueue = async () => {
     setLoading(true);
     try {
-      const { data, error } = await supabase.from("scheduled_clones").select("*");
-      if (error) throw error;
-      setClones(data || []);
+      const { data: { user } } = await supabase.auth.getUser();
+      setCurrentUser(user);
+
+      if (user) {
+        const isUserAdmin = user.email?.toLowerCase() === "aamaanaah22@gmail.com" || user.role === "admin";
+        setIsAdminUser(isUserAdmin);
+
+        let query = supabase.from("scheduled_clones").select("*");
+        // Apply user isolation: standard users always only see their own schedules
+        if (!isUserAdmin || viewScope === "mine") {
+          query = query.eq("user_id", user.id);
+        }
+        
+        const { data, error } = await query;
+        if (error) throw error;
+        setClones(data || []);
+      } else {
+        setClones([]);
+      }
       setError(null);
       fetchProfiles();
     } catch (err: any) {
@@ -120,7 +151,7 @@ export default function QueueSchedulerPage() {
       fetchQueue();
     }, 15000);
     return () => clearInterval(interval);
-  }, []);
+  }, [viewScope]);
 
   const handleDelete = async (id: string) => {
     const isOk = await confirm({
@@ -465,9 +496,13 @@ export default function QueueSchedulerPage() {
       return;
     }
 
+    const spacingLabel = effectiveSpacingMinutes >= 60 
+      ? `${(effectiveSpacingMinutes / 60).toFixed(1).replace(/\.0$/, "")} ساعة (${effectiveSpacingMinutes} دقيقة)`
+      : `${effectiveSpacingMinutes} دقيقة`;
+
     const isOk = await confirm({
       title: "إعادة توزيع وقت الجدولة",
-      message: `هل تريد إعادة توزيع وتنسيق جدولة ${pendingItems.length} فيديوهات تلقائياً بتباعد قدره ${spacingMinutes} دقيقة لتجنب الحظر؟`,
+      message: `هل تريد إعادة توزيع وتنسيق جدولة ${pendingItems.length} فيديوهات تلقائياً بتباعد قدره ${spacingLabel} بين كل فيديو لتجنب الحظر؟`,
       confirmText: "تنسيق الجدولة",
       cancelText: "إلغاء",
       variant: "warning",
@@ -508,7 +543,7 @@ export default function QueueSchedulerPage() {
         if (error) throw error;
 
         // Increment baseline for the next item
-        currentMiliseconds += spacingMinutes * 60 * 1000;
+        currentMiliseconds += effectiveSpacingMinutes * 60 * 1000;
       }
 
       await fetchQueue();
@@ -875,36 +910,36 @@ export default function QueueSchedulerPage() {
         </div>
 
         {/* Status Badges & Controls */}
-        <div className="flex items-center gap-4 w-full lg:w-auto justify-between lg:justify-end shrink-0 pt-3 lg:pt-0 border-t lg:border-0 border-slate-100">
+        <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 w-full lg:w-auto justify-between lg:justify-end shrink-0 pt-2.5 lg:pt-0 border-t lg:border-0 border-slate-100">
           {/* Status Badge */}
-          <div className="flex flex-col items-end gap-1.5">
+          <div className="flex flex-row sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-1.5">
             {item.status === "paused" && (
               <span className="text-[10px] font-bold text-amber-900 bg-amber-100/90 border border-amber-200 px-2.5 py-1 rounded-lg flex items-center gap-1">
-                <Pause className="w-3 h-3 text-amber-700" />
+                <Pause className="w-3 h-3 text-amber-700 shrink-0" />
                 <span>موقوف مؤقتاً</span>
               </span>
             )}
             {item.status === "pending" && (
               <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-100 px-2.5 py-1 rounded-lg flex items-center gap-1">
-                <Clock className="w-3 h-3 animate-pulse text-amber-600" />
+                <Clock className="w-3 h-3 animate-pulse text-amber-600 shrink-0" />
                 <span>في الانتظار</span>
               </span>
             )}
             {item.status === "processing" && (
               <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-2.5 py-1 rounded-lg flex items-center gap-1">
-                <Loader2 className="w-3 h-3 animate-spin text-indigo-600" />
+                <Loader2 className="w-3 h-3 animate-spin text-indigo-600 shrink-0" />
                 <span>جاري السحب والرفع...</span>
               </span>
             )}
             {item.status === "completed" && (
               <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 px-2.5 py-1 rounded-lg flex items-center gap-1">
-                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
                 <span>تم النشر بنجاح</span>
               </span>
             )}
             {item.status === "failed" && (
               <span className="text-[10px] font-bold text-rose-700 bg-rose-50 border border-rose-100 px-2.5 py-1 rounded-lg flex items-center gap-1" title={item.error_message}>
-                <XCircle className="w-3 h-3 text-rose-600" />
+                <XCircle className="w-3 h-3 text-rose-600 shrink-0" />
                 <span>فشل النشر</span>
               </span>
             )}
@@ -917,7 +952,7 @@ export default function QueueSchedulerPage() {
           </div>
 
           {/* Operational Action buttons */}
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5 justify-end">
             {/* Edit Destination Button */}
             <button
               onClick={() => handleOpenEditDestinationForSingle(item)}
@@ -933,7 +968,7 @@ export default function QueueSchedulerPage() {
                 <button
                   onClick={() => handlePublishNow(item.id)}
                   disabled={actionId === item.id}
-                  className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-xl transition-colors cursor-pointer"
+                  className="p-2 bg-indigo-50 hover:bg-indigo-100 text-indigo-600 rounded-xl transition-colors cursor-pointer flex items-center gap-1 text-xs font-bold"
                   title="نشر الآن فوراً"
                 >
                   {actionId === item.id ? (
@@ -941,6 +976,7 @@ export default function QueueSchedulerPage() {
                   ) : (
                     <Play className="w-4 h-4" />
                   )}
+                  <span className="inline sm:hidden text-[10px]">نشر</span>
                 </button>
                 <button
                   onClick={() => handleUpdateStatus(item.id, 'paused')}
@@ -957,7 +993,7 @@ export default function QueueSchedulerPage() {
               <button
                 onClick={() => handleUpdateStatus(item.id, 'pending')}
                 disabled={actionId === item.id}
-                className="p-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl transition-colors cursor-pointer"
+                className="p-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl transition-colors cursor-pointer flex items-center gap-1 text-xs font-bold"
                 title="استئناف النشر"
               >
                 {actionId === item.id ? (
@@ -965,6 +1001,7 @@ export default function QueueSchedulerPage() {
                 ) : (
                   <Play className="w-4 h-4" />
                 )}
+                <span className="inline sm:hidden text-[10px]">استئناف</span>
               </button>
             )}
 
@@ -1001,88 +1038,123 @@ export default function QueueSchedulerPage() {
     <div className="space-y-6 animate-fade-in text-right font-sans" id="queue-scheduler-page-root">
       
       {/* Page Header */}
-      <div className="bg-white rounded-2xl border border-slate-100 p-6 shadow-xs flex flex-col md:flex-row items-center justify-between gap-4">
-        <div className="space-y-1.5 w-full md:w-auto">
-          <h3 className="text-md font-bold text-slate-800 flex items-center gap-2 justify-end md:justify-start">
-            <Clock className="w-5 h-5 text-indigo-500" />
-            <span>تنظيم وجدولة الفيديوهات المتتابعة</span>
-          </h3>
+      <div className="bg-white rounded-2xl border border-slate-100 p-4 sm:p-6 shadow-xs flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-4">
+        <div className="space-y-1.5 text-right flex-1 min-w-0">
+          <div className="flex items-center gap-2 justify-end sm:justify-start flex-wrap">
+            <Clock className="w-5 h-5 text-indigo-500 shrink-0" />
+            <h3 className="text-sm sm:text-base font-bold text-slate-800">
+              تنظيم وجدولة الفيديوهات المتتابعة
+            </h3>
+            {isAdminUser && (
+              <span className="text-[10px] bg-purple-100 text-purple-800 font-bold px-2 py-0.5 rounded-md border border-purple-200">
+                صلاحية مشرف 👑
+              </span>
+            )}
+          </div>
           <p className="text-xs text-slate-500 leading-relaxed">
             تنظيم ذكي للرفع المتتابع وتوزيع الفترات الزمنية لتجنب تكرار الطلبات وحظر الـ IP من المنصات المستهدفة.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap justify-end shrink-0">
+          {isAdminUser && (
+            <div className="flex items-center bg-slate-100 p-1 rounded-xl text-xs font-bold">
+              <button
+                type="button"
+                onClick={() => setViewScope("mine")}
+                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                  viewScope === "mine" ? "bg-white text-indigo-600 shadow-xs" : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                جدولتي فقط 👤
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewScope("all")}
+                className={`px-3 py-1.5 rounded-lg transition-all cursor-pointer ${
+                  viewScope === "all" ? "bg-white text-indigo-600 shadow-xs" : "text-slate-600 hover:text-slate-900"
+                }`}
+              >
+                كافة المستخدمين 👥
+              </button>
+            </div>
+          )}
+
           <button
             onClick={fetchQueue}
             disabled={loading}
-            className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-xl transition-all cursor-pointer flex items-center gap-2 text-xs font-bold"
+            className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl transition-all cursor-pointer flex items-center gap-1.5 text-xs font-bold"
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin" : ""}`} />
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? "animate-spin text-indigo-600" : ""}`} />
             <span>تحديث القائمة</span>
           </button>
         </div>
       </div>
 
       {/* Safety & IP Ban metrics dashboard */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-2.5 sm:gap-4">
         {/* Metric 1: IP safety status */}
-        <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-2xs flex items-center justify-between gap-4">
-          <div className="p-3 bg-emerald-50 rounded-2xl text-emerald-600">
-            <ShieldCheck className="w-6 h-6" />
+        <div className="bg-white border border-slate-100 rounded-2xl p-3 sm:p-4 shadow-2xs flex items-center justify-between gap-3">
+          <div className="p-2 sm:p-3 bg-emerald-50 rounded-xl sm:rounded-2xl text-emerald-600 shrink-0">
+            <ShieldCheck className="w-5 h-5 sm:w-6 sm:h-6" />
           </div>
-          <div className="space-y-0.5 text-right">
-            <span className="text-[10px] font-bold text-slate-400 block">حالة أمان الـ IP والطلبات</span>
-            <span className="text-xs font-bold text-emerald-600">آمن وحماية مفعّلة ✓</span>
-            <span className="text-[9px] text-slate-400 block mt-0.5">يتم النشر بالتتابع (Limit 1)</span>
+          <div className="space-y-0.5 text-right min-w-0">
+            <span className="text-[9px] sm:text-[10px] font-bold text-slate-400 block truncate">حالة أمان الـ IP</span>
+            <span className="text-xs font-bold text-emerald-600 block truncate">حماية مفعّلة ✓</span>
+            <span className="text-[8px] sm:text-[9px] text-slate-400 block truncate">نشر بالتتابع (Limit 1)</span>
           </div>
         </div>
 
         {/* Metric 2: Recommendation Interval */}
-        <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-2xs flex items-center justify-between gap-4">
-          <div className="p-3 bg-indigo-50 rounded-2xl text-indigo-600">
-            <Sliders className="w-6 h-6" />
+        <div className="bg-white border border-slate-100 rounded-2xl p-3 sm:p-4 shadow-2xs flex items-center justify-between gap-3">
+          <div className="p-2 sm:p-3 bg-indigo-50 rounded-xl sm:rounded-2xl text-indigo-600 shrink-0">
+            <Sliders className="w-5 h-5 sm:w-6 sm:h-6" />
           </div>
-          <div className="space-y-0.5 text-right">
-            <span className="text-[10px] font-bold text-slate-400 block">الفاصل الزمني الموصى به</span>
-            <span className="text-xs font-bold text-slate-700">15 - 30 دقيقة لكل فيديو</span>
-            <span className="text-[9px] text-indigo-500 font-medium block mt-0.5">يمنع سلوك الروبوتات المريب</span>
+          <div className="space-y-0.5 text-right min-w-0">
+            <span className="text-[9px] sm:text-[10px] font-bold text-slate-400 block truncate">الفاصل الموصى به</span>
+            <span className="text-xs font-bold text-slate-700 block truncate">15 - 60 دقيقة</span>
+            <span className="text-[8px] sm:text-[9px] text-indigo-500 font-medium block truncate">يمنع حظر الحسابات</span>
           </div>
         </div>
 
         {/* Metric 3: Scheduled today monitor */}
-        <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-2xs flex items-center justify-between gap-4">
-          <div className="p-3 bg-amber-50 rounded-2xl text-amber-600">
-            <Flame className="w-6 h-6" />
+        <div className="bg-white border border-slate-100 rounded-2xl p-3 sm:p-4 shadow-2xs flex items-center justify-between gap-3">
+          <div className="p-2 sm:p-3 bg-amber-50 rounded-xl sm:rounded-2xl text-amber-600 shrink-0">
+            <Flame className="w-5 h-5 sm:w-6 sm:h-6" />
           </div>
-          <div className="space-y-0.5 text-right">
-            <span className="text-[10px] font-bold text-slate-400 block">المجدول لليوم الحالي</span>
-            <span className="text-xs font-bold text-slate-700">{todayCount} فيديوهات مجدولة</span>
-            <span className="text-[9px] text-slate-400 block mt-0.5">الحد الأقصى اليومي الآمن: 15</span>
+          <div className="space-y-0.5 text-right min-w-0">
+            <span className="text-[9px] sm:text-[10px] font-bold text-slate-400 block truncate">المجدول لليوم</span>
+            <span className="text-xs font-bold text-slate-700 block truncate">{todayCount} فيديوهات</span>
+            <span className="text-[8px] sm:text-[9px] text-slate-400 block truncate">الحد الآمن: 15/يوم</span>
           </div>
         </div>
 
         {/* Metric 4: Summary of Queue */}
-        <div className="bg-white border border-slate-100 rounded-2xl p-4 shadow-2xs flex items-center justify-between gap-4">
-          <div className="p-3 bg-indigo-50 rounded-2xl text-indigo-600">
-            <Hourglass className="w-6 h-6" />
+        <div className="bg-white border border-slate-100 rounded-2xl p-3 sm:p-4 shadow-2xs flex items-center justify-between gap-3">
+          <div className="p-2 sm:p-3 bg-indigo-50 rounded-xl sm:rounded-2xl text-indigo-600 shrink-0">
+            <Hourglass className="w-5 h-5 sm:w-6 sm:h-6" />
           </div>
-          <div className="space-y-0.5 text-right">
-            <span className="text-[10px] font-bold text-slate-400 block">إجمالي محتوى الانتظار</span>
-            <span className="text-xs font-bold text-indigo-600">{pendingCount} فيديو قيد الانتظار</span>
-            <span className="text-[9px] text-slate-400 block mt-0.5">من أصل {totalCount} إجمالي العناصر</span>
+          <div className="space-y-0.5 text-right min-w-0">
+            <span className="text-[9px] sm:text-[10px] font-bold text-slate-400 block truncate">محتوى الانتظار</span>
+            <span className="text-xs font-bold text-indigo-600 block truncate">{pendingCount} فيديو قيد الانتظار</span>
+            <span className="text-[8px] sm:text-[9px] text-slate-400 block truncate">إجمالي: {totalCount}</span>
           </div>
         </div>
       </div>
 
       {/* Smart Spacing Organizer Panel */}
-      <div className="bg-slate-900 text-white rounded-2xl p-6 shadow-md space-y-5 border border-slate-800">
-        <div className="flex items-center gap-2 border-b border-slate-800 pb-3">
-          <Sliders className="w-4 h-4 text-indigo-400" />
-          <h4 className="text-sm font-bold">موزّع ومنسّق الجدولة الذكي (مكافحة الحظر)</h4>
+      <div className="bg-slate-900 text-white rounded-2xl p-4 sm:p-6 shadow-md space-y-4 sm:space-y-5 border border-slate-800">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 border-b border-slate-800 pb-3">
+          <div className="flex items-center gap-2">
+            <Sliders className="w-4 h-4 text-indigo-400 shrink-0" />
+            <h4 className="text-xs sm:text-sm font-bold">موزّع ومنسّق الجدولة الذكي (مكافحة الحظر)</h4>
+          </div>
+          <div className="text-[11px] text-indigo-300 font-medium">
+            الفاصل الفعلي المعتمد: <strong className="font-mono text-white text-xs">{effectiveSpacingMinutes >= 60 ? `${(effectiveSpacingMinutes / 60).toFixed(1).replace(/\.0$/, "")} ساعة (${effectiveSpacingMinutes} دقيقة)` : `${effectiveSpacingMinutes} دقيقة`}</strong>
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 items-end text-right">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5 sm:gap-4 items-end text-right">
           {/* Start Datetime */}
           <div className="space-y-1.5">
             <label className="block text-xs font-bold text-slate-300">وقت بدء النشر المتتابع:</label>
@@ -1099,35 +1171,74 @@ export default function QueueSchedulerPage() {
           <div className="space-y-1.5">
             <label className="block text-xs font-bold text-slate-300">الفاصل الزمني بين الفيديوهات:</label>
             <select
-              value={spacingMinutes}
-              onChange={(e) => setSpacingMinutes(Number(e.target.value))}
+              value={spacingSelection}
+              onChange={(e) => setSpacingSelection(e.target.value)}
               className="w-full px-3 py-2.5 bg-slate-800 border border-slate-700 rounded-xl text-xs text-white focus:outline-none focus:border-indigo-500 font-bold"
             >
-              <option value={5}>5 دقائق (غير موصى به)</option>
-              <option value={10}>10 دقائق</option>
-              <option value={15}>15 دقيقة</option>
-              <option value={20}>20 دقيقة (موصى به لـ Zernio)</option>
-              <option value={30}>30 دقيقة (موصى به لـ Buffer)</option>
-              <option value={45}>45 دقيقة</option>
-              <option value={60}>1 ساعة</option>
-              <option value={120}>ساعتين (مثالي لحسابات حديثة)</option>
+              <optgroup label="⏱️ فواصل بالدقائق">
+                <option value="5">5 دقائق (غير موصى به)</option>
+                <option value="10">10 دقائق</option>
+                <option value="15">15 دقيقة</option>
+                <option value="20">20 دقيقة (موصى به لـ Zernio)</option>
+                <option value="30">30 دقيقة (موصى به لـ Buffer)</option>
+                <option value="45">45 دقيقة</option>
+              </optgroup>
+              <optgroup label="⏳ فواصل بالساعات (مسبقة الإعداد)">
+                <option value="60">ساعة واحدة (60 دقيقة)</option>
+                <option value="120">ساعتين (120 دقيقة - موصى به للحسابات الجديدة)</option>
+                <option value="180">3 ساعات (180 دقيقة)</option>
+                <option value="240">4 ساعات (240 دقيقة)</option>
+                <option value="360">6 ساعات (360 دقيقة)</option>
+                <option value="480">8 ساعات (480 دقيقة)</option>
+                <option value="720">12 ساعة (نصف يوم)</option>
+                <option value="1440">24 ساعة (يوم كامل)</option>
+                <option value="2880">48 ساعة (يومان)</option>
+              </optgroup>
+              <optgroup label="⚙️ تخصيص يدوي">
+                <option value="custom_hours">⏱️ وقت مخصص بالساعات (حدد الساعات يدوياً)...</option>
+              </optgroup>
             </select>
           </div>
 
-          {/* Jitter offset toggle */}
-          <div className="flex items-center gap-2 pb-3.5">
-            <input
-              type="checkbox"
-              id="enable-jitter"
-              checked={enableJitter}
-              onChange={(e) => setEnableJitter(e.target.checked)}
-              className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 border-slate-700 rounded-md bg-slate-800 cursor-pointer"
-            />
-            <label htmlFor="enable-jitter" className="text-xs font-bold text-slate-300 cursor-pointer selection:bg-transparent">
-              تفعيل التذبذب الزمني العشوائي (+/- 3د)
-            </label>
-            <Info className="w-3.5 h-3.5 text-slate-400 cursor-help" title="يقوم بإضافة فترات عشوائية بسيطة لكي تبدو المواعيد بشرية وطبيعية تماماً لمنصات التواصل الاجتماعي" />
-          </div>
+          {/* Custom Hours Input (Shown when custom_hours is selected) */}
+          {spacingSelection === "custom_hours" ? (
+            <div className="space-y-1.5 animate-fade-in">
+              <label className="block text-xs font-bold text-indigo-300">
+                أدخل الفاصل بالساعات (ساعات):
+              </label>
+              <div className="relative">
+                <input
+                  type="number"
+                  min="0.1"
+                  max="720"
+                  step="0.5"
+                  value={customHours}
+                  onChange={(e) => setCustomHours(Math.max(0.1, parseFloat(e.target.value) || 1))}
+                  placeholder="مثال: 3 أو 5.5"
+                  className="w-full px-3 py-2.5 bg-slate-800 border-2 border-indigo-500 rounded-xl text-xs text-white focus:outline-none font-mono font-bold"
+                  style={{ direction: "ltr" }}
+                />
+                <span className="absolute right-3 top-2.5 text-xs text-slate-400 font-sans pointer-events-none">
+                  ساعة
+                </span>
+              </div>
+            </div>
+          ) : (
+            /* Jitter offset toggle */
+            <div className="flex items-center gap-2 pb-2 sm:pb-3.5">
+              <input
+                type="checkbox"
+                id="enable-jitter"
+                checked={enableJitter}
+                onChange={(e) => setEnableJitter(e.target.checked)}
+                className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 border-slate-700 rounded-md bg-slate-800 cursor-pointer"
+              />
+              <label htmlFor="enable-jitter" className="text-xs font-bold text-slate-300 cursor-pointer selection:bg-transparent">
+                تفعيل التذبذب الزمني (+/- 3د)
+              </label>
+              <Info className="w-3.5 h-3.5 text-slate-400 cursor-help shrink-0" title="يقوم بإضافة فترات عشوائية بسيطة لتبدو المواعيد بشرية وطبيعية لمنصات التواصل" />
+            </div>
+          )}
 
           {/* Action Button */}
           <button
@@ -1137,25 +1248,44 @@ export default function QueueSchedulerPage() {
           >
             {isOrganizing ? (
               <>
-                <Loader2 className="w-4 h-4 animate-spin" />
-                <span>جاري إعادة الجدولة والتوزيع...</span>
+                <Loader2 className="w-4 h-4 animate-spin shrink-0" />
+                <span className="truncate">جاري إعادة الجدولة والتوزيع...</span>
               </>
             ) : organizeSuccess ? (
               <>
-                <Check className="w-4 h-4 text-emerald-400" />
-                <span>تم توزيع الجدولة بنجاح!</span>
+                <Check className="w-4 h-4 text-emerald-400 shrink-0" />
+                <span className="truncate">تم توزيع الجدولة بنجاح!</span>
               </>
             ) : (
               <>
-                <Sparkles className="w-4 h-4 text-indigo-300" />
-                <span>توزيع الجدولة والتباعد تلقائياً ({pendingCount})</span>
+                <Sparkles className="w-4 h-4 text-indigo-300 shrink-0" />
+                <span className="truncate">توزيع الجدولة تلقائياً ({pendingCount})</span>
               </>
             )}
           </button>
         </div>
+
+        {spacingSelection === "custom_hours" && (
+          <div className="flex items-center gap-2 pt-1 border-t border-slate-800/80">
+            <input
+              type="checkbox"
+              id="enable-jitter-custom"
+              checked={enableJitter}
+              onChange={(e) => setEnableJitter(e.target.checked)}
+              className="w-4 h-4 text-indigo-600 focus:ring-indigo-500 border-slate-700 rounded-md bg-slate-800 cursor-pointer"
+            />
+            <label htmlFor="enable-jitter-custom" className="text-xs font-bold text-slate-300 cursor-pointer selection:bg-transparent">
+              تفعيل التذبذب الزمني العشوائي (+/- 3د)
+            </label>
+            <span className="text-[10px] text-indigo-300 mr-auto font-medium">
+              الفاصل: {customHours} ساعة = {Math.round(customHours * 60)} دقيقة
+              {pendingCount > 0 && ` | إجمالي توزيع ${pendingCount} فيديو سيغطي ${(pendingCount * customHours).toFixed(1)} ساعة`}
+            </span>
+          </div>
+        )}
         
         <p className="text-[10px] text-slate-400 leading-relaxed">
-          💡 <strong>آلية عمل الموزّع:</strong> سيأخذ جميع الفيديوهات التي بوضع الانتظار، ويرتبها زمنياً، ثم يعيد جدولة مواعيد نشرها بالتتابع مع الفاصل الزمني المختار بدءاً من الوقت الذي حددته، مما يمنع نهائياً تراكم الطلبات والـ IP Block.
+          💡 <strong>آلية عمل الموزّع:</strong> سيأخذ جميع الفيديوهات التي بوضع الانتظار، ويرتبها زمنياً، ثم يعيد جدولة مواعيد نشرها بالتتابع مع الفاصل الزمني المختار (بالساعات أو الدقائق) بدءاً من الوقت الذي حددته، مما يمنع نهائياً تراكم الطلبات وحظر الـ IP.
         </p>
       </div>
 

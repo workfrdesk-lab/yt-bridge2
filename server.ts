@@ -8996,8 +8996,25 @@ app.get("/api/db/scheduled_clones", async (req, res) => {
 
   try {
     const p = getDbPool();
-    const result = await p.query("SELECT * FROM scheduled_clones ORDER BY scheduled_time ASC");
-    return res.json(result.rows);
+    const userId = ((req.query.user_id || req.query.userId || req.headers["x-user-id"]) as string)?.trim();
+    const viewAll = req.query.all === "true" || req.query.viewAll === "true" || req.query.scope === "all";
+
+    if (userId) {
+      const userIsAdmin = await isAdmin(userId);
+      if (userIsAdmin && viewAll) {
+        const result = await p.query("SELECT * FROM scheduled_clones ORDER BY scheduled_time ASC");
+        return res.json(result.rows);
+      } else {
+        const result = await p.query(
+          "SELECT * FROM scheduled_clones WHERE user_id = $1 ORDER BY scheduled_time ASC",
+          [userId]
+        );
+        return res.json(result.rows);
+      }
+    } else {
+      // If unauthenticated or no userId provided, return empty list to protect user privacy
+      return res.json([]);
+    }
   } catch (err: any) {
     console.error("[DB] get scheduled_clones error:", err.message);
     res.status(500).json({ error: `فشل جلب الفيديوهات المجدولة من PostgreSQL: ${err.message}` });

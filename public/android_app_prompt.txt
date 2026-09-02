@@ -1,0 +1,194 @@
+================================================================================
+  PROMPT: ARCHITECTURE & COMPLETE IMPLEMENTATION OF FULL-FEATURED ANDROID APP
+  PROJECT: SOCIAL AUTO-CLONER, VIDEO PROCESSOR & MULTI-PLATFORM SCHEDULER
+  TARGET: KOTLIN / JETPACK COMPOSE / MVVM CLEAN ARCHITECTURE / ANDROID 8.0+ (API 26+)
+================================================================================
+
+[ROLE & OBJECTIVE]
+You are a Principal Android Engineer and System Architect. Your task is to design, structure, and write the complete source code for a production-grade, enterprise-ready Android application in Kotlin with Jetpack Compose.
+
+This app is an end-to-end automation platform that replicates all features of a high-performance Video Downloader, Copyright Avoidance Video Processor, Caption Studio, Automated Channel Tracker, Multi-Platform Auto-Publisher (Buffer, Zernio, TikTok, YouTube Shorts, FB/IG Reels), Smart Queue Scheduler with Anti-Ban Spacing Engine, and Proxy/Cookie Manager.
+
+--------------------------------------------------------------------------------
+1. TECHNOLOGY STACK & ARCHITECTURAL GUIDELINES
+--------------------------------------------------------------------------------
+- Language: 100% Modern Kotlin with strict Coroutines & StateFlow.
+- UI Framework: Jetpack Compose with Material Design 3 (M3), full Arabic RTL & LTR support, dynamic theming (Dark & Light modes), responsive layouts (Phones & Tablets).
+- Architecture: MVVM (Model-View-ViewModel) + Clean Architecture (Data, Domain, Presentation layers).
+- Dependency Injection: Hilt (Dagger-Hilt).
+- Networking: Retrofit 2 + OkHttp 3 with custom Interceptors (Dynamic Proxy Selector, CookieJar, Auth Token Interceptor, Retry Mechanism).
+- Local Database: Room Database with TypeConverters, Flow-based reactive queries, and encryption (SQLCipher).
+- Background Operations: Android Jetpack WorkManager with CoroutineWorker, Foreground Services with persistent progress notifications for long video renders and batch uploads.
+- Video Processing & Player: AndroidX Media3 (ExoPlayer) + FFmpegKit for Android (or MobileFFmpeg) for high-performance on-device video encoding, audio pitch manipulation, filters, and caption burn-in.
+- Image & Video Loading: Coil-Compose with disk and memory cache.
+
+--------------------------------------------------------------------------------
+2. CORE FUNCTIONAL MODULES & SPECIFICATIONS
+--------------------------------------------------------------------------------
+
+MODULE 1: AUTHENTICATION & ROLE-BASED ACCESS CONTROL (RBAC)
+- Clean Login & Register screens with email/password validation.
+- Secure Token Storage using EncryptedSharedPreferences / Jetpack DataStore.
+- User Isolation: Standard users can only view and manage their own channels, scheduled videos, and templates.
+- Admin Privileges: Admin badge, ability to toggle between "My Queue" and "All Users Queue", user approval system, and audit logs viewer.
+
+MODULE 2: SOCIAL VIDEO EXPLORER & WATERMARK-FREE EXTRACTOR
+- Support for YouTube (Videos & Shorts), TikTok (No Watermark), Facebook Reels, Instagram Reels.
+- Capabilities:
+  * Single URL analyzer: Extract thumbnail, high-definition direct stream URLs, video title, author, duration, sound info, and hashtags.
+  * Channel/Profile Explorer: Fetch recent posts/videos with pagination, search, and multi-select.
+  * Direct Download Manager: Download to local storage or cache with resume support.
+
+MODULE 3: COPYRIGHT-AVOIDANCE VIDEO PROCESSOR (ANTI-COPYRIGHT ENGINE)
+- Real-time video manipulation pipeline using FFmpegKit:
+  * Speed Adjustment: 0.9x to 1.15x with sound tempo correction.
+  * Audio Pitch Shift: Slight semi-tone shift to bypass acoustic fingerprinting.
+  * Visual Framing: Dynamic background blur, custom colored borders, and slight crop/zoom.
+  * Color Grading: Contrast, saturation, brightness adjustment, and subtle cinematic LUT filters.
+  * Horizontal Mirror/Flip option.
+  * Background Noise & Watermark Injection: Add subtle custom overlay text or logos with opacity control.
+
+MODULE 4: CAPTION TEMPLATES & DYNAMIC SUBTITLE STUDIO
+- Visual Caption Template Builder:
+  * Custom font selection (Arabic typography, English display fonts).
+  * Text positioning (Top, Center, Bottom, Margin controls).
+  * Color palettes (Text fill, stroke/outline color, highlight box background, border radius).
+  * Text transformation: Dynamic title substitution, custom tags, channel watermark insertion.
+  * Live Preview Player using ExoPlayer with real-time overlay simulator.
+  * FFmpeg-based hardcoded subtitle rendering / drawing onto video frames.
+
+MODULE 5: AUTOMATED CHANNEL TRACKER & CONTENT MONITOR (CRON ENGINE)
+- Background Channel Tracking using WorkManager (PeriodicWorkRequest / Custom polling):
+  * Track YouTube channels via Channel ID, Username (@handle), or RSS / Apify Actor.
+  * Configurable monitoring intervals (Every 15m, 30m, 1h, 6h, 12h, 24h).
+  * Target Selector: Choose to clone "Shorts Only", "Standard Videos Only", or "All Content".
+  * Auto-Clone Pipeline: Automatically detect new video uploads, trigger anti-copyright processing, apply chosen caption template, and push to target publishing queues.
+
+MODULE 6: MULTI-PLATFORM AUTO-PUBLISHER
+- Multi-Service Publishing Integration:
+  * Buffer Publishing: Publish / Schedule to TikTok, Instagram Reels, Facebook Pages, YouTube Shorts, Twitter/X, LinkedIn, Threads, Pinterest.
+  * Zernio Publishing: Publish directly to connected profiles with custom API key.
+  * Direct Publishing APIs (TikTok API / YouTube Data API v3).
+- Instant "Publish Now" button with immediate status feedback.
+- Detailed error logging with retry triggers for failed uploads.
+
+MODULE 7: SMART QUEUE SCHEDULER & ANTI-BAN SPACING ENGINE
+- Centralized scheduling queue with real-time state: Pending, Processing, Completed, Paused, Failed.
+- IP Protection & Anti-Ban Mechanism:
+  * Smart Spacing Organizer: Bulk-reorganize pending items with sequential time offsets.
+  * Flexible Spacing Selector: Presets in minutes (10m, 15m, 20m, 30m) or Custom Hours (e.g., 1h, 2h, 3.5h, 6h, 12h, 24h).
+  * Random Jitter Offset (+/- 3 to 5 minutes) to mimic natural human posting behavior.
+  * Strict Concurrency Lock: Prevents simultaneous API requests from triggering rate-limits or IP bans.
+- Inline schedule editor (Change publish time, pause, resume, reorder, delete).
+
+MODULE 8: PROXY & COOKIE ROTATOR
+- Custom Proxy Manager supporting HTTP, HTTPS, SOCKS5, and SOCKS5h proxies.
+- Proxy validation tool (Latency test, Geo-location detection, IP check).
+- Netscape / JSON YouTube Cookies Importer & Parser for authenticated extraction.
+- Automatic proxy fallback on connection failure.
+
+MODULE 9: CLOUDINARY MEDIA CLOUD INTEGRATION
+- Cloudinary direct upload integration (Unsigned & Signed presets).
+- Video optimization and transformation on-the-fly (Auto-format, f_auto, q_auto, video trimming).
+
+MODULE 10: ADMIN AUDIT LOGS & SYSTEM DASHBOARD
+- Real-time logging of background tasks, sync jobs, and publish attempts.
+- Filtering by severity (INFO, WARNING, ERROR) and category.
+- Storage cleaner to purge local cached video files and temporary render artifacts.
+
+--------------------------------------------------------------------------------
+3. DATABASE SCHEMA & ENTITIES (ROOM & CLOUD POSTGRESQL)
+--------------------------------------------------------------------------------
+
+1. UserEntity:
+   - id: String (UUID)
+   - email: String
+   - fullName: String
+   - role: String ("admin" | "user")
+   - isApproved: Boolean
+   - createdAt: Long
+
+2. TrackedChannelEntity:
+   - id: String
+   - userId: String
+   - channelId: String
+   - channelName: String
+   - channelUrl: String
+   - platform: String ("buffer" | "zernio" | "direct")
+   - targetProfileId: String
+   - targetContentType: String ("shorts" | "all" | "regular")
+   - checkIntervalMinutes: Int
+   - lastCheckedAt: Long
+   - isPaused: Boolean
+   - autoAvoidCopyright: Boolean
+   - captionTemplateId: String?
+
+3. ScheduledCloneEntity:
+   - id: String
+   - userId: String
+   - videoId: String
+   - videoTitle: String
+   - videoUrl: String
+   - thumbnailUrl: String
+   - targetPlatform: String
+   - targetProfileId: String
+   - scheduledTime: String (ISO 8601)
+   - status: String ("pending" | "processing" | "completed" | "paused" | "failed")
+   - errorMessage: String?
+   - bypassSettings: String (JSON)
+   - channelName: String?
+   - createdAt: Long
+
+4. CaptionTemplateEntity:
+   - id: String
+   - userId: String
+   - name: String
+   - fontName: String
+   - fontSize: Int
+   - textColor: String
+   - outlineColor: String
+   - outlineWidth: Int
+   - backgroundColor: String?
+   - position: String ("top" | "center" | "bottom")
+   - marginBottom: Int
+   - isDefault: Boolean
+
+5. ProxyEntity:
+   - id: String
+   - host: String
+   - port: Int
+   - protocol: String ("http" | "https" | "socks5")
+   - username: String?
+   - password: String?
+   - isActive: Boolean
+   - latencyMs: Long
+
+--------------------------------------------------------------------------------
+4. JETPACK COMPOSE UI/UX ARCHITECTURE & NAVIGATION
+--------------------------------------------------------------------------------
+- Bottom Navigation Bar / Navigation Rail:
+  1. Explorer (Search, Discover & Single URL Downloader)
+  2. Automation (Tracked Channels Hub & Auto-Cloner)
+  3. Scheduler (Queue Manager, Calendar View, Anti-Ban Organizer)
+  4. Studio (Anti-Copyright Editor & Caption Template Builder)
+  5. Settings (Cloudinary, Buffer/Zernio Keys, Proxies, Admin Panel)
+- Smooth animations using AnimatedVisibility and shared element transitions.
+- Interactive Dialogs: Edit Destination, Schedule Customizer, Confirmation Modals with warning states.
+- Pull-to-refresh on all list screens.
+- Swipe-to-action (Swipe to pause/resume, swipe to delete).
+
+--------------------------------------------------------------------------------
+5. STEP-BY-STEP IMPLEMENTATION INSTRUCTIONS
+--------------------------------------------------------------------------------
+1. Setup Gradle dependencies (Compose, Material3, Hilt, Room, Retrofit, WorkManager, FFmpegKit, Media3 ExoPlayer).
+2. Configure AndroidManifest with necessary permissions (INTERNET, FOREGROUND_SERVICE, POST_NOTIFICATIONS, WAKE_LOCK, READ_EXTERNAL_STORAGE).
+3. Implement Clean Architecture layers:
+   - Domain: UseCases for Video Processing, Channel Polling, Publishing, Scheduling.
+   - Data: Repositories, Remote Data Sources, Room DAOs, WorkManager Worker classes.
+   - Presentation: ViewModels with UI State (sealed interfaces), Composable Screens, Reusable UI Components.
+4. Build the Background Engine using WorkManager with Foreground Service notifications for video rendering and scheduling triggers.
+5. Implement the Spacing Algorithm with Jitter calculation and custom hours support.
+6. Provide comprehensive unit tests and automated integration guidelines.
+
+Please write the complete code, project structure, and detailed documentation for this Android app.
+================================================================================
