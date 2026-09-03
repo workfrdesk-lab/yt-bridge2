@@ -593,7 +593,7 @@ export function ScheduledClonesQueue() {
               </span>
             )}
 
-            {item.error_message && (
+            {item.status === "failed" && item.error_message && (
               <p className="text-[9px] text-slate-400 max-w-[200px] truncate text-left" title={item.error_message}>
                 {item.error_message}
               </p>

@@ -1,7 +1,7 @@
 import express from "express";
 import path from "path";
 import fs from "fs";
-import { exec, spawn, execSync } from "child_process";
+import { exec, spawn, execSync, spawnSync } from "child_process";
 import { v2 as cloudinary } from "cloudinary";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
@@ -6801,7 +6801,7 @@ async function runScheduledClonesStep() {
     // Atomically claim the next pending clone using FOR UPDATE SKIP LOCKED to eliminate race conditions
     const claimResult = await p.query(`
       UPDATE scheduled_clones
-      SET status = 'processing', processing_started_at = NOW(), updated_at = NOW()
+      SET status = 'processing', error_message = NULL, processing_started_at = NOW(), updated_at = NOW()
       WHERE id = (
         SELECT id FROM scheduled_clones
         WHERE status = 'pending' AND scheduled_time <= NOW()
@@ -9210,6 +9210,9 @@ app.put("/api/db/scheduled_clones", async (req, res) => {
     if (status !== undefined) {
       updates.push(`status = $${idx++}`);
       values.push(status);
+      if (status === "pending" && error_message === undefined) {
+        updates.push(`error_message = NULL`);
+      }
     }
     if (error_message !== undefined) {
       updates.push(`error_message = $${idx++}`);
@@ -9487,12 +9490,202 @@ export const DEFAULT_CAPTION_TEMPLATES = [
 
 let inMemoryCaptionTemplates: any[] = [...DEFAULT_CAPTION_TEMPLATES];
 
+function escapeSvgText(text: string): string {
+  return (text || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function hexToRgbaSvg(hex: string, alpha: number): string {
+  let c = (hex || "#000000").replace("#", "").trim();
+  if (c.length === 3) c = c.split("").map(x => x + x).join("");
+  const r = parseInt(c.slice(0, 2), 16) || 0;
+  const g = parseInt(c.slice(2, 4), 16) || 0;
+  const b = parseInt(c.slice(4, 6), 16) || 0;
+  return `rgba(${r},${g},${b},${Math.max(0, Math.min(1, alpha)).toFixed(2)})`;
+}
+
+function wrapCaptionWords(text: string, maxCharsPerLine: number = 28): string[] {
+  const words = (text || "").trim().split(/\s+/);
+  const lines: string[] = [];
+  let curr: string[] = [];
+  let currLen = 0;
+  for (const w of words) {
+    if (currLen + w.length + (curr.length ? 1 : 0) <= maxCharsPerLine) {
+      curr.push(w);
+      currLen += w.length + (curr.length > 1 ? 1 : 0);
+    } else {
+      if (curr.length) lines.push(curr.join(" "));
+      curr = [w];
+      currLen = w.length;
+    }
+  }
+  if (curr.length) lines.push(curr.join(" "));
+  return lines.length ? lines : [text || "Follow for more 🚀"];
+}
+
+export async function applyNativeSvgCaptionToVideo(
+  inputPath: string,
+  outputPath: string,
+  templateOpts: any,
+  customText?: string
+): Promise<void> {
+  const text = (customText || templateOpts?.sample_text || "Follow for more 🚀").trim();
+
+  let videoW = 720;
+  let videoH = 1280;
+  try {
+    const probeProc = spawnSync("ffprobe", [
+      "-v", "error",
+      "-select_streams", "v:0",
+      "-show_entries", "stream=width,height",
+      "-of", "json",
+      inputPath
+    ], { encoding: "utf8" });
+    if (probeProc.status === 0 && probeProc.stdout) {
+      const parsed = JSON.parse(probeProc.stdout);
+      if (parsed.streams?.[0]?.width && parsed.streams?.[0]?.height) {
+        videoW = parseInt(parsed.streams[0].width, 10);
+        videoH = parseInt(parsed.streams[0].height, 10);
+      }
+    }
+  } catch (e) {
+    console.warn("[Native Caption] ffprobe warning, defaulting to 720x1280:", e);
+  }
+
+  const scale = Math.max(0.5, Math.min(2.5, videoW / 720.0));
+  const fontSizePt = parseFloat(templateOpts?.font_size || 44);
+  const actualFontSize = Math.max(16, Math.round(fontSizePt * scale * 0.88));
+  const charsPerLine = Math.max(16, Math.floor((videoW * 0.82) / (actualFontSize * 0.60)));
+  const lines = wrapCaptionWords(text, charsPerLine);
+
+  const lineHeight = Math.round(actualFontSize * 1.35);
+  const textContentH = lines.length * lineHeight;
+  const maxLineLen = Math.max(...lines.map(l => l.length));
+  const estTextW = Math.round(maxLineLen * actualFontSize * 0.62);
+
+  const padX = Math.max(14, Math.round(parseFloat(templateOpts?.padding_x || 22) * scale));
+  const padY = Math.max(10, Math.round(parseFloat(templateOpts?.padding_y || 12) * scale));
+  const radius = Math.max(4, Math.round(parseFloat(templateOpts?.border_radius || 16) * scale));
+
+  const maxCardW = Math.max(180, Math.round(videoW * 0.88));
+  const cardW = Math.min(maxCardW, Math.max(180, estTextW + padX * 2));
+  const cardH = textContentH + padY * 2;
+
+  const fontColor = String(templateOpts?.font_color || "#FFFFFF");
+  const bgColor = String(templateOpts?.background_color || "#000000");
+  const bgOpacity = templateOpts?.background_opacity !== undefined ? parseFloat(templateOpts.background_opacity) : 0.75;
+  const hasBg = templateOpts?.has_background !== false && bgOpacity > 0.01;
+  const rgbaBg = hasBg ? hexToRgbaSvg(bgColor, bgOpacity) : "none";
+
+  const strokeColor = String(templateOpts?.stroke_color || "#000000");
+  const strokeWidthVal = parseFloat(templateOpts?.stroke_width || 0);
+  const strokeWidth = Math.max(0, Math.round(strokeWidthVal * scale));
+  const strokeAttr = strokeWidth > 0 ? `stroke="${strokeColor}" stroke-width="${strokeWidth}" paint-order="stroke fill"` : "";
+
+  const fontFamily = templateOpts?.font_family || "Cairo";
+  let fontPath = path.resolve(process.cwd(), `fonts/${fontFamily}-Bold.ttf`);
+  if (!fs.existsSync(fontPath)) {
+    fontPath = path.resolve(process.cwd(), "fonts/Cairo-Bold.ttf");
+  }
+  const fontFace = fs.existsSync(fontPath) ? `
+    @font-face {
+      font-family: 'CapFont';
+      src: url('${fontPath}');
+    }` : "";
+
+  let svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${cardW}" height="${cardH}">
+  <defs>
+    <style>${fontFace}
+      .t {
+        font-family: 'CapFont', 'Cairo', Arial, sans-serif;
+        font-size: ${actualFontSize}px;
+        font-weight: bold;
+        fill: ${fontColor};
+      }
+    </style>
+  </defs>\n`;
+
+  if (hasBg) {
+    svg += `  <rect x="0" y="0" width="${cardW}" height="${cardH}" rx="${radius}" ry="${radius}" fill="${rgbaBg}"/>\n`;
+  }
+
+  const startY = padY + Math.round(actualFontSize * 0.95);
+  svg += `  <text x="${Math.round(cardW / 2)}" y="${startY}" class="t" text-anchor="middle" dominant-baseline="alphabetic" ${strokeAttr} direction="rtl">\n`;
+  for (let i = 0; i < lines.length; i++) {
+    const dy = i === 0 ? 0 : lineHeight;
+    svg += `    <tspan x="${Math.round(cardW / 2)}" dy="${dy}">${escapeSvgText(lines[i])}</tspan>\n`;
+  }
+  svg += `  </text>\n</svg>`;
+
+  const tempSvgPath = path.join("/tmp", `cap_svg_${Date.now()}_${Math.floor(Math.random() * 10000)}.svg`);
+  const tempPngPath = path.join("/tmp", `cap_png_${Date.now()}_${Math.floor(Math.random() * 10000)}.png`);
+
+  try {
+    fs.writeFileSync(tempSvgPath, svg, "utf8");
+
+    const rasterRes = spawnSync("ffmpeg", ["-y", "-i", tempSvgPath, tempPngPath]);
+    if (rasterRes.status !== 0 || !fs.existsSync(tempPngPath)) {
+      throw new Error(`FFmpeg SVG rasterization failed: ${rasterRes.stderr?.toString()?.slice(-200)}`);
+    }
+
+    const posYPercent = templateOpts?.position_y_percent;
+    const posPreset = String(templateOpts?.position || "bottom").toLowerCase();
+    let overlayY = Math.round(videoH - cardH - (videoH * 0.12));
+    if (posYPercent !== undefined && String(posYPercent).trim() !== "") {
+      const p = parseFloat(posYPercent) / 100.0;
+      overlayY = Math.round(videoH * p - cardH / 2);
+    } else if (posPreset === "top") {
+      overlayY = Math.round(videoH * 0.12);
+    } else if (posPreset === "center" || posPreset === "middle") {
+      overlayY = Math.round((videoH - cardH) / 2);
+    }
+
+    overlayY = Math.max(10, Math.min(videoH - cardH - 10, overlayY));
+
+    const overlayRes = spawnSync("ffmpeg", [
+      "-y",
+      "-i", inputPath,
+      "-i", tempPngPath,
+      "-filter_complex", `[0:v][1:v]overlay=(W-w)/2:${overlayY}`,
+      "-c:a", "copy",
+      outputPath
+    ]);
+
+    if (overlayRes.status !== 0 || !fs.existsSync(outputPath)) {
+      throw new Error(`FFmpeg overlay failed: ${overlayRes.stderr?.toString()?.slice(-200)}`);
+    }
+
+    console.log(`[Native Caption Success] Burnt ${cardW}x${cardH} caption directly to ${outputPath}`);
+  } finally {
+    if (fs.existsSync(tempSvgPath)) {
+      try { fs.unlinkSync(tempSvgPath); } catch (_) {}
+    }
+    if (fs.existsSync(tempPngPath)) {
+      try { fs.unlinkSync(tempPngPath); } catch (_) {}
+    }
+  }
+}
+
 export async function applyMoviePyCaptionToVideo(
   inputPath: string,
   outputPath: string,
   templateOpts: any,
   customText?: string
 ): Promise<void> {
+  // Primary: Native high-performance SVG/FFmpeg overlay (100% portable, zero Python or convert dependency)
+  try {
+    await applyNativeSvgCaptionToVideo(inputPath, outputPath, templateOpts, customText);
+    if (fs.existsSync(outputPath)) {
+      return;
+    }
+  } catch (nativeErr: any) {
+    console.warn("[Caption Engine] Native SVG overlay attempt failed, falling back to Python:", nativeErr.message);
+  }
+
   return new Promise((resolve, reject) => {
     try {
       const scriptPath = path.resolve(process.cwd(), "render_moviepy_caption.py");

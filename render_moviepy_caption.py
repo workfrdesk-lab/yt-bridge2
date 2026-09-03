@@ -372,18 +372,25 @@ def build_caption_overlay_imagemagick(convert_bin, identify_bin, text, template_
 def build_caption_overlay(text, template_opts, video_w, video_h, output_png):
     """
     Master overlay builder:
-    Tries ImageMagick if available.
-    If ImageMagick is not found or fails, falls back seamlessly to the SVG engine.
+    Uses the native FFmpeg Vector SVG Rendering Engine by default.
+    It produces crisp, scalable, high-resolution vector text with rounded background,
+    proper RTL Arabic word-wrapping, padding, borders and zero dependency on convert/ImageMagick.
     """
-    im_info = find_imagemagick()
-    if im_info:
-        convert_bin, ident_bin = im_info
-        try:
-            return build_caption_overlay_imagemagick(convert_bin, ident_bin, text, template_opts, video_w, video_h, output_png)
-        except Exception as im_err:
-            print(f"[Caption Engine] ImageMagick failed ({im_err}), falling back to native SVG engine...", file=sys.stderr)
+    try:
+        return build_caption_overlay_svg(text, template_opts, video_w, video_h, output_png)
+    except Exception as svg_err:
+        print(f"[Caption Engine] Native SVG rendering encountered ({svg_err}), attempting fallback...", file=sys.stderr)
 
-    # Fallback to pure SVG engine
+    # Fallback to ImageMagick if SVG encountered any issues
+    try:
+        im_info = find_imagemagick()
+        if im_info:
+            convert_bin, ident_bin = im_info
+            return build_caption_overlay_imagemagick(convert_bin, ident_bin, text, template_opts, video_w, video_h, output_png)
+    except Exception as im_err:
+        print(f"[Caption Engine] Fallback ImageMagick also failed ({im_err})", file=sys.stderr)
+
+    # Final guaranteed attempt with SVG
     return build_caption_overlay_svg(text, template_opts, video_w, video_h, output_png)
 
 def render_caption(input_video_path, output_video_path, template_opts, custom_text=None):

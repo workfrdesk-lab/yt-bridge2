@@ -226,16 +226,21 @@ export default function QueueSchedulerPage() {
   const handleUpdateStatus = async (id: string, newStatus: 'pending' | 'paused') => {
     setActionId(id);
     try {
+      const updateData: any = { status: newStatus };
+      if (newStatus === 'pending') {
+        updateData.error_message = null;
+        updateData.scheduled_time = new Date().toISOString();
+      }
       const { error } = await supabase
         .from("scheduled_clones")
-        .update({ status: newStatus })
+        .update(updateData)
         .eq("id", id);
       
       if (error) throw error;
       
       setClones((prev) =>
         prev.map((item) =>
-          item.id === id ? { ...item, status: newStatus } : item
+          item.id === id ? { ...item, status: newStatus, error_message: newStatus === 'pending' ? undefined : item.error_message } : item
         )
       );
     } catch (err: any) {
@@ -944,7 +949,7 @@ export default function QueueSchedulerPage() {
               </span>
             )}
 
-            {item.error_message && (
+            {item.status === "failed" && item.error_message && (
               <p className="text-[9px] text-rose-600 max-w-[220px] font-medium leading-relaxed bg-rose-50/50 p-1.5 rounded-lg border border-rose-100/30 text-left overflow-x-auto whitespace-pre" title={item.error_message}>
                 {item.error_message}
               </p>
