@@ -9508,7 +9508,25 @@ export async function applyMoviePyCaptionToVideo(
       }
 
       console.log(`[MoviePy] Spawning caption renderer for ${inputPath} -> ${outputPath}`);
-      const proc = spawn("python3", args);
+      const pyCmd = getPythonCommand() || "python3";
+      const extendedPath = [
+        process.env.PATH,
+        "/usr/local/bin",
+        "/usr/bin",
+        "/bin",
+        "/usr/local/sbin",
+        "/usr/sbin",
+        "/sbin",
+        "/run/current-system/sw/bin",
+        "/nix/var/nix/profiles/default/bin"
+      ].filter(Boolean).join(":");
+
+      const proc = spawn(pyCmd, args, {
+        env: {
+          ...process.env,
+          PATH: extendedPath
+        }
+      });
       let stderrLogs = "";
 
       proc.stderr.on("data", (d) => {
