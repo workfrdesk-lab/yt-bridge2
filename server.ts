@@ -24,6 +24,11 @@ if (!fs.existsSync(downloadsDir)) {
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
+// Immediate health check endpoint
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", port: PORT, time: new Date().toISOString() });
+});
+
 let ytDlpPath = "yt-dlp";
 let cachedPythonCmd: string | null = null;
 
@@ -5247,6 +5252,9 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
   if (cleanTitle.length > 95) {
     cleanTitle = cleanTitle.slice(0, 95).trim();
   }
+  if (!cleanTitle) {
+    cleanTitle = "Shorts Video";
+  }
 
   // Universal helper to build candidates for any known or requested service
   const buildCandidatesForService = (serviceName: string, channelId: string) => {
@@ -5254,6 +5262,8 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
     const cands: any[] = [];
 
     if (s === "youtube" || s.includes("youtube")) {
+      // YouTube STRICTLY requires categoryId and title in Buffer GraphQL API.
+      // Every YouTube candidate MUST include a valid categoryId (never omit categoryId).
       cands.push({
         ...baseInput,
         channelId,
@@ -5282,7 +5292,40 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
         metadata: {
           youtube: {
             title: cleanTitle,
-            categoryId: "24"
+            categoryId: "1", // Film & Animation
+            privacy: "public"
+          }
+        }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: {
+          youtube: {
+            title: cleanTitle,
+            categoryId: "23", // Comedy
+            privacy: "public"
+          }
+        }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: {
+          youtube: {
+            title: cleanTitle,
+            categoryId: "20", // Gaming
+            privacy: "public"
+          }
+        }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: {
+          youtube: {
+            title: cleanTitle,
+            categoryId: "24" // Minimal valid payload
           }
         }
       });
@@ -5301,7 +5344,9 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
         channelId,
         metadata: {
           youtube: {
-            title: cleanTitle
+            title: cleanTitle,
+            categoryId: "26", // Howto & Style
+            privacy: "public"
           }
         }
       });
@@ -5420,7 +5465,7 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
     // Default generic fallback list for unknown channels
     if (videoUrl) {
       // If the text looks like YouTube shorts or YouTube was mentioned, try YouTube first
-      if (rawPostText.toLowerCase().includes("#shorts") || rawPostText.toLowerCase().includes("youtube")) {
+      if (rawPostText.toLowerCase().includes("#shorts") || rawPostText.toLowerCase().includes("youtube") || rawPostText.toLowerCase().includes("short")) {
         cands.push(...buildCandidatesForService("youtube", channelId));
       }
       cands.push({
@@ -5436,12 +5481,22 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
       cands.push(...buildCandidatesForService("youtube", channelId));
       cands.push({
         ...baseInput,
-        channelId
+        channelId,
+        metadata: { facebook: { type: "post" } }
       });
       cands.push({
         ...baseInput,
         channelId,
-        metadata: { facebook: { type: "post" } }
+        metadata: { instagram: { type: "post" } }
+      });
+      cands.push({
+        ...baseInput,
+        channelId,
+        metadata: { tiktok: {} }
+      });
+      cands.push({
+        ...baseInput,
+        channelId
       });
     } else {
       cands.push({
@@ -5551,6 +5606,14 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
                     candidateInputs.push(hc);
                   }
                 }
+              } else if (gqlErrMsg.includes("YouTube posts require") || gqlErrMsg.includes("youtube") || gqlErrMsg.includes("category")) {
+                console.log(`[Buffer GraphQL] Auto-healing from GraphQL error: Detected YouTube requirements.`);
+                const ytCandidates = buildCandidatesForService("youtube", cleanProfId);
+                for (const yc of ytCandidates) {
+                  if (!candidateInputs.some(c => JSON.stringify(c.metadata) === JSON.stringify(yc.metadata))) {
+                    candidateInputs.push(yc);
+                  }
+                }
               }
               continue;
             }
@@ -5583,7 +5646,7 @@ async function publishWithGraphQL(cleanToken: string, profileIds: string[], text
                   candidateInputs.push(hc);
                 }
               }
-            } else if (errMsg.includes("YouTube posts require") || errMsg.includes("youtube")) {
+            } else if (errMsg.includes("YouTube posts require") || errMsg.includes("youtube") || errMsg.includes("category")) {
               console.log(`[Buffer GraphQL] Auto-healing: Detected YouTube requirements from error message.`);
               const ytCandidates = buildCandidatesForService("youtube", cleanProfId);
               for (const yc of ytCandidates) {
@@ -6092,7 +6155,7 @@ function addAgentLog(msg: string) {
   }
 }
 
-async function runWorkflowAgentStep() {
+async function runWorkflowAgentStep(specificChannelId?: string) {
   if (workflowAgentState.status === "running") {
     console.log("[Workflow Agent] Step already running, skipping this tick.");
     return;
@@ -6107,15 +6170,17 @@ async function runWorkflowAgentStep() {
   workflowAgentState.lastRun = new Date().toISOString();
   saveAutomationSettingInDb("workflow_agent_last_run", workflowAgentState.lastRun);
   saveAutomationSettingInDb("workflow_agent_status", "running");
-  addAgentLog("بدء دورة الفحص التلقائية للقنوات تحت التتبع...");
+  addAgentLog(specificChannelId ? "بدء مزامنة القناة المحددة مع تطبيق كافة معالجات الفيديو والكابشن..." : "بدء دورة الفحص التلقائية للقنوات تحت التتبع...");
 
   try {
     const p = getDbPool();
-    // Fetch active channels
-    const channelsRes = await p.query("SELECT * FROM tracked_channels WHERE is_paused = false");
+    // Fetch channels (either the single requested channel or all unpaused channels)
+    const channelsRes = specificChannelId
+      ? await p.query("SELECT * FROM tracked_channels WHERE id = $1", [specificChannelId])
+      : await p.query("SELECT * FROM tracked_channels WHERE is_paused = false");
     const activeChannels = channelsRes.rows;
 
-    addAgentLog(`تم العثور على ${activeChannels.length} قنوات نشطة تحت التتبع التلقائي.`);
+    addAgentLog(`تم العثور على ${activeChannels.length} قنوات للمعالجة والمزامنة.`);
 
     if (activeChannels.length === 0) {
       workflowAgentState.status = "idle";
@@ -6157,6 +6222,7 @@ async function runWorkflowAgentStep() {
 
     for (const channel of activeChannels) {
       const channelName = channel.channel_name;
+      let currentProcessedId: string | null = null;
       addAgentLog(`جاري فحص قناة: "${channelName}"...`);
 
       // Get the channel-specific proxy if defined in bypass_settings
@@ -6270,6 +6336,18 @@ async function runWorkflowAgentStep() {
 
         // ⚡ New video detected!
         addAgentLog(`⚡ تم اكتشاف فيديو جديد بالكامل لم يتم نشره مسبقاً! جاري بدء المعالجة والنشر التلقائي...`);
+
+        // Reserve video immediately in processed_videos to lock it against any concurrent executions
+        currentProcessedId = `proc_${Math.random().toString(36).substring(2, 12)}`;
+        try {
+          await p.query(
+            "INSERT INTO processed_videos (id, channel_id, video_id, video_title, published_to_buffer) VALUES ($1, $2, $3, $4, $5)",
+            [currentProcessedId, channel.id, newestVideo.id, newestVideo.title, false]
+          );
+        } catch (reserveErr: any) {
+          addAgentLog(`⚠️ تم تجاوز الفيديو "${newestVideo.title}" لأنه قيد المعالجة حالياً.`);
+          continue;
+        }
 
         // 1. Get Direct stream URL
         addAgentLog(`[-] جاري استخراج روابط البث المباشر للفيديو باستخدام yt-dlp...`);
@@ -6394,7 +6472,7 @@ async function runWorkflowAgentStep() {
               }
             } catch (capErr: any) {
               console.error("[MoviePy Caption Error in Tracker]:", capErr);
-              addAgentLog(`⚠️ تعذر تطبيق كابشن MoviePy (${capErr.message}) - جاري المتابعة`);
+              throw new Error(`فشل تطبيق كابشن MoviePy: ${capErr.message || capErr}`);
             }
           }
 
@@ -6638,12 +6716,13 @@ async function runWorkflowAgentStep() {
 
                 // Add to PostgreSQL tables
         const logId = `log_${Math.random().toString(36).substring(2, 12)}`;
-        const processedId = `proc_${Math.random().toString(36).substring(2, 12)}`;
 
-        await p.query(
-          "INSERT INTO processed_videos (id, channel_id, video_id, video_title, published_to_buffer) VALUES ($1, $2, $3, $4, $5)",
-          [processedId, channel.id, newestVideo.id, newestVideo.title, publishSuccess]
-        );
+        if (currentProcessedId) {
+          await p.query(
+            "UPDATE processed_videos SET published_to_buffer = $1 WHERE id = $2",
+            [publishSuccess, currentProcessedId]
+          );
+        }
 
         await p.query(
           "INSERT INTO automation_logs (id, channel_name, video_title, status, message) VALUES ($1, $2, $3, $4, $5)",
@@ -6652,8 +6731,11 @@ async function runWorkflowAgentStep() {
       } catch (channelErr: any) {
         console.error(`[Workflow Agent] Error processing channel "${channelName}":`, channelErr);
         addAgentLog(`❌ خطأ أثناء معالجة قناة "${channelName}": ${channelErr.message}`);
-        
+
         try {
+          if (currentProcessedId) {
+            await p.query("DELETE FROM processed_videos WHERE id = $1 AND published_to_buffer = false", [currentProcessedId]).catch(() => {});
+          }
           const logId = `log_${Math.random().toString(36).substring(2, 12)}`;
           await p.query(
             "INSERT INTO automation_logs (id, channel_name, video_title, status, message) VALUES ($1, $2, $3, $4, $5)",
@@ -6711,28 +6793,32 @@ async function runScheduledClonesStep() {
   let clone: any = null;
   try {
     const p = getDbPool();
-    // Recover any orphaned 'processing' tasks that might have been interrupted by a reboot
+    // Recover any genuinely orphaned 'processing' tasks that might have been interrupted by a server reboot (>25 min ago)
     await p.query(
-      "UPDATE scheduled_clones SET status = 'pending' WHERE status = 'processing' AND scheduled_time <= NOW() - INTERVAL '3 minutes'"
+      "UPDATE scheduled_clones SET status = 'pending', processing_started_at = NULL WHERE status = 'processing' AND processing_started_at IS NOT NULL AND processing_started_at <= NOW() - INTERVAL '25 minutes'"
     );
 
-    const result = await p.query(
-      "SELECT * FROM scheduled_clones WHERE status = 'pending' AND scheduled_time <= NOW() ORDER BY scheduled_time ASC LIMIT 1"
-    );
+    // Atomically claim the next pending clone using FOR UPDATE SKIP LOCKED to eliminate race conditions
+    const claimResult = await p.query(`
+      UPDATE scheduled_clones
+      SET status = 'processing', processing_started_at = NOW(), updated_at = NOW()
+      WHERE id = (
+        SELECT id FROM scheduled_clones
+        WHERE status = 'pending' AND scheduled_time <= NOW()
+        ORDER BY scheduled_time ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+      )
+      RETURNING *;
+    `);
 
-    if (result.rows.length === 0) {
+    if (claimResult.rows.length === 0) {
       isProcessingClones = false;
       return;
     }
 
-    clone = result.rows[0];
-    console.log(`[Scheduled Clones] Processing scheduled clone: "${clone.video_title}" (ID: ${clone.id})`);
-    
-    // Mark as processing
-    await p.query(
-      "UPDATE scheduled_clones SET status = 'processing' WHERE id = $1",
-      [clone.id]
-    );
+    clone = claimResult.rows[0];
+    console.log(`[Scheduled Clones] Atomically claimed clone: "${clone.video_title}" (ID: ${clone.id})`);
 
     // Get cookies and proxy if any
     let cookiesText = "";
@@ -6854,6 +6940,7 @@ async function runScheduledClonesStep() {
           }
         } catch (capErr: any) {
           console.error("[Scheduled Clones] MoviePy Caption Error:", capErr);
+          throw new Error(`فشل تطبيق الكابشن على الفيديو المجدول: ${capErr.message || capErr}`);
         }
       }
 
@@ -7152,21 +7239,23 @@ async function runScheduledClonesStep() {
 
 function startScheduledClonesAgent() {
   if (scheduledClonesTimer) {
-    clearInterval(scheduledClonesTimer);
+    clearTimeout(scheduledClonesTimer);
     scheduledClonesTimer = null;
   }
-  scheduledClonesTimer = setInterval(() => {
-    runScheduledClonesStep().catch(err => {
-      console.error("[Scheduled Clones Agent] Background run error:", err);
-    });
-  }, 20000);
 
-  // Run initial scan 3 seconds after boot
-  setTimeout(() => {
-    runScheduledClonesStep().catch(err => {
-      console.error("[Scheduled Clones Agent] Initial boot run error:", err);
-    });
-  }, 3000);
+  const scheduleNext = (delayMs: number) => {
+    scheduledClonesTimer = setTimeout(async () => {
+      try {
+        await runScheduledClonesStep();
+      } catch (err: any) {
+        console.error("[Scheduled Clones Agent] Sequential run error:", err);
+      } finally {
+        scheduleNext(15000);
+      }
+    }, delayMs);
+  };
+
+  scheduleNext(3000);
 }
 
 // REST Endpoints for Agent Management
@@ -7201,6 +7290,24 @@ app.post("/api/workflow-agent/run-now", async (req, res) => {
   });
 
   res.json({ success: true, message: "تم إطلاق فحص القنوات والتحقق منها بنجاح في الخلفية." });
+});
+
+app.post("/api/workflow-agent/sync-channel", async (req, res) => {
+  const { channelId } = req.body;
+  if (!channelId) {
+    return res.status(400).json({ error: "معرف القناة مطلوب للمزامنة." });
+  }
+
+  if (workflowAgentState.status === "running") {
+    return res.status(400).json({ error: "مجدول الأتمتة قيد الفحص حالياً بالفعل. يرجى الانتظار حتى اكتمال الدورة الحالية." });
+  }
+
+  // Run asynchronously through the complete server-side pipeline (with MoviePy, filters, logo, and Buffer posting)
+  runWorkflowAgentStep(channelId).catch(err => {
+    console.error(`[Workflow Agent] Error syncing channel ${channelId}:`, err);
+  });
+
+  res.json({ success: true, message: "تم بدء مزامنة ومعالجة القناة بنجاح في الخلفية عبر خادم الأتمتة." });
 });
 
 // REST Endpoints for Persistent Automation Settings
@@ -7543,9 +7650,19 @@ async function initializePostgresTables() {
         scheduled_time TIMESTAMP NOT NULL,
         status VARCHAR(50) DEFAULT 'pending',
         error_message TEXT,
+        processing_started_at TIMESTAMP WITH TIME ZONE,
+        updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
+      ALTER TABLE scheduled_clones ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMP WITH TIME ZONE;
+      ALTER TABLE scheduled_clones ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP;
     `);
+
+    try {
+      await p.query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_processed_videos_unique ON processed_videos (channel_id, video_id)`);
+    } catch (idxErr: any) {
+      console.warn("[DB Init] Unique index on processed_videos notice:", idxErr.message);
+    }
 
     // Create caption_templates table (MoviePy caption templates)
     await p.query(`
@@ -9378,9 +9495,10 @@ export async function applyMoviePyCaptionToVideo(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
+      const scriptPath = path.resolve(process.cwd(), "render_moviepy_caption.py");
       const configJson = JSON.stringify(templateOpts || {});
       const args = [
-        "render_moviepy_caption.py",
+        scriptPath,
         "--input", inputPath,
         "--output", outputPath,
         "--config", configJson
@@ -9923,20 +10041,6 @@ app.get(["/api/db/publishing_profiles", "/api/publishing-profiles"], async (req,
 // ==========================================
 
 async function startServer() {
-  // Initialize database schema tables on boot
-  await initializePostgresTables();
-
-  // Ensure yt-dlp binary is present or auto-downloaded on boot
-  await ensureYtDlp().catch((err) => {
-    console.error("[Server] Error ensuring yt-dlp binary:", err.message);
-  });
-
-  // Start the background workflow automation agent
-  startWorkflowAgent();
-
-  // Start the scheduled clones sequential publisher agent
-  startScheduledClonesAgent();
-
   if (process.env.NODE_ENV !== "production") {
     // Development mode
     const vite = await createViteServer({
@@ -9955,6 +10059,29 @@ async function startServer() {
 
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://0.0.0.0:${PORT}`);
+
+    // Asynchronously bootstrap database, binaries, and background agents without delaying HTTP listen
+    (async () => {
+      try {
+        await initializePostgresTables();
+      } catch (dbErr: any) {
+        console.error("[Server Init] Database initialization notice:", dbErr.message);
+      }
+
+      try {
+        await ensureYtDlp();
+      } catch (err: any) {
+        console.error("[Server Init] Error ensuring yt-dlp binary:", err.message);
+      }
+
+      // Start the background workflow automation agent
+      startWorkflowAgent();
+
+      // Start the scheduled clones sequential publisher agent
+      startScheduledClonesAgent();
+    })().catch((err: any) => {
+      console.error("[Server Init] Background bootstrap error:", err);
+    });
   });
 }
 

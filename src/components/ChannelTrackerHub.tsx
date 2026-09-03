@@ -910,234 +910,30 @@ export default function ChannelTrackerHub() {
     }
 
     setSyncingIdx(idx);
-    setSyncLogs(["جاري الاتصال بقنوات يوتيوب وسحب قائمة الفيديوهات الأخيرة..."]);
+    setSyncLogs(["جاري الاتصال بخادم الأتمتة لبدء المزامنة وتطبيق الفلاتر والكابشن..."]);
     
     try {
-      await new Promise(r => setTimeout(r, 1200));
-      
-      // 1. Fetch channel videos from our server endpoint
-      const res = await fetch("/api/channel-videos", {
+      const res = await fetch("/api/workflow-agent/sync-channel", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          channelQuery: channel.channel_url,
-          proxyUrl: channel.bypass_settings?.proxy,
-          targetContentType: channel.bypass_settings?.targetContentType || "both"
-        }),
+        body: JSON.stringify({ channelId: channel.id }),
       });
 
       const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "فشل سحب الفيديوهات.");
-
-      const newestVideo = data.videos && data.videos[0];
-      if (!newestVideo) {
-        setSyncLogs(prev => [...prev, "⚠️ لم يتم العثور على أي مقاطع فيديو عامة في هذه القناة حالياً."]);
-        throw new Error("لا توجد مقاطع فيديو في القناة.");
-      }
+      if (!res.ok) throw new Error(data.error || "فشل بدء المزامنة.");
 
       setSyncLogs(prev => [
         ...prev,
-        `✓ تم العثور على أحدث فيديو: "${newestVideo.title}"`,
-        `[-] جاري فحص حالة النشر للفيديو لمنع التكرار...`
-      ]);
-      await new Promise(r => setTimeout(r, 1000));      // 2. Check Daily Limit from logs
-      const { data: logs, error: countError } = await supabase.from("automation_logs");
-      if (countError) throw countError;
-
-      const todayStr = new Date().toISOString().split("T")[0];
-      const todayLogs = (logs || []).filter((l: any) => 
-        l.channel_name === channel.channel_name && 
-        l.status === "success" && 
-        l.created_at && l.created_at.startsWith(todayStr)
-      );
-
-      const dailyCount = todayLogs.length;
-      const limit = channel.bypass_settings?.maxVideosPerDay || 3;
-      if (dailyCount >= limit) {
-        setSyncLogs(prev => [...prev, `⚠️ تم الوصول للحد الأقصى اليومي للنشر للقناة "${channel.channel_name}" (${dailyCount}/${limit}). سيتم التخطي.`]);
-        setSyncingIdx(null);
-        return;
-      }
-      
-      // 3. Process with ffmpeg and upload to Cloudinary
-      setSyncLogs(prev => [
-        ...prev,
-        `[-] جاري سحب رابط البث المباشر للفيديو باستخدام yt-dlp...`
+        `✓ تم إطلاق مهمة الفحص والمعالجة بنجاح عبر خادم الأتمتة الموحد!`,
+        `[-] جاري فحص مقاطع القناة، استخراج الفيديو الجديد، دمج كابشن MoviePy الاحترافي، والنشر لمرة واحدة فقط دون أي تكرار.`
       ]);
 
-      const infoRes = await fetch("/api/video-info", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ 
-          videoUrl: newestVideo.url,
-          proxyUrl: channel.bypass_settings?.proxy
-        })
-      });
-
-      const infoData = await infoRes.json();
-      if (!infoRes.ok) {
-        throw new Error(infoData.error || "فشل الحصول على معلومات الفيديو ورابط البث.");
-      }
-
-      const bestVideoUrl = infoData.bestVideoUrl;
-      if (!bestVideoUrl) {
-        throw new Error("فشل الحصول على رابط بث مباشر صالح للفيديو.");
-      }
-
-      setSyncLogs(prev => [
-        ...prev,
-        `✓ تم سحب رابط البث المباشر بنجاح!`,
-        `[-] جاري رفع الفيديو وتطبيق فلاتر تجنب الكوبيرايت وتخزينه على Cloudinary سحابياً...`
-      ]);
-
-      const uploadRes = await fetch("/api/upload-cloudinary", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          directUrl: bestVideoUrl,
-          title: newestVideo.title,
-          videoUrl: newestVideo.url,
-          cookiesText: "",
-          avoidCopyright: true,
-          hflip: channel.bypass_settings?.hflip || false,
-          speedUp: channel.bypass_settings?.speedUp || false,
-          pitchShift: channel.bypass_settings?.pitchShift || false,
-          colorBoost: channel.bypass_settings?.colorBoost || false
-        })
-      });
-
-      const uploadData = await uploadRes.json();
-      if (!uploadRes.ok) {
-        throw new Error(uploadData.error || "فشل معالجة الفيديو ورفعه إلى Cloudinary.");
-      }
-
-      const finalVideoUrl = uploadData.secureUrl;
-      if (!finalVideoUrl) {
-        throw new Error("فشل استلام رابط فيديو صالح بعد المعالجة والرفع.");
-      }
-
-      setSyncLogs(prev => [
-        ...prev,
-        `✓ تم تعديل الفيديو ورفعه بنجاح إلى Cloudinary سحابياً! الرابط متوفر الآن.`
-      ]);
-
-      const isZernio = channel.platform === "zernio";
-      let publishStatusMessage = "";
-      
-      setSyncLogs(prev => [
-        ...prev,
-        isZernio 
-          ? `[-] جاري إرسال المنشور ونشر الفيديو تلقائياً إلى منصة Zernio...`
-          : `[-] جاري إرسال المنشور ونشر الفيديو تلقائياً إلى حساب Buffer الخاص بك...`
-      ]);
-
-      if (isZernio) {
-        publishStatusMessage = `تمت الأتمتة بنجاح! تم كشف مقطع جديد، تطبيق فلاتر الكوبيرايت، ونشره بنجاح عبر Zernio إلى الحساب (${channel.zernio_profile_id}).`;
-        try {
-          const isWebhook = channel.zernio_profile_id === "WEBHOOK_MODE";
-          const publishRes = await fetch("/api/zernio/publish", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              apiKey: isWebhook ? undefined : channel.zernio_api_key,
-              webhookUrl: isWebhook ? channel.zernio_api_key : undefined,
-              profileIds: isWebhook ? undefined : [channel.zernio_profile_id],
-              text: generateSmartCaption(newestVideo.title, "#Zernio"),
-              media: {
-                video: finalVideoUrl,
-                thumbnail: newestVideo.thumbnail
-              },
-              now: true
-            })
-          });
-
-          const publishData = await publishRes.json();
-          if (publishRes.ok) {
-            setSyncLogs(prev => [
-              ...prev,
-              `✓ تم النشر بنجاح وتأكيد الإرسال عبر Zernio!`
-            ]);
-          } else {
-            publishStatusMessage = `تنبيه: تم تسجيل معالجة الفيديو ولكن فشل النشر في Zernio: ${publishData.error || "خطأ غير معروف"}`;
-            setSyncLogs(prev => [
-              ...prev,
-              `⚠️ تنبيه: تم تسجيل معالجة الفيديو ولكن فشل النشر في Zernio: ${publishData.error || "خطأ غير معروف"}`
-            ]);
-          }
-        } catch (publishErr: any) {
-          publishStatusMessage = `تنبيه: تم تسجيل معالجة الفيديو ولكن فشل الاتصال بـ Zernio: ${publishErr.message}`;
-          setSyncLogs(prev => [
-            ...prev,
-            `⚠️ فشل الاتصال بـ Zernio: ${publishErr.message}`
-          ]);
-        }
-      } else {
-        publishStatusMessage = `تمت الأتمتة بنجاح! تم كشف مقطع جديد، تطبيق فلاتر الكوبيرايت، ونشره بنجاح عبر Buffer إلى الحساب (${channel.buffer_profile_id}).`;
-        try {
-          const publishRes = await fetch("/api/buffer/publish", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              accessToken: channel.buffer_access_token,
-              profileIds: [channel.buffer_profile_id],
-              text: generateSmartCaption(newestVideo.title),
-              media: {
-                video: finalVideoUrl,
-                thumbnail: newestVideo.thumbnail
-              },
-              now: true
-            })
-          });
-
-          const publishData = await publishRes.json();
-          if (publishRes.ok) {
-            setSyncLogs(prev => [
-              ...prev,
-              `✓ تم النشر بنجاح وتأكيد الإرسال عبر Buffer!`
-            ]);
-          } else {
-            publishStatusMessage = `تنبيه: تم تسجيل معالجة الفيديو ولكن فشل النشر في Buffer: ${publishData.error || "خطأ غير معروف"}`;
-            setSyncLogs(prev => [
-              ...prev,
-              `⚠️ تنبيه: تم تسجيل معالجة الفيديو ولكن فشل النشر في Buffer: ${publishData.error || "خطأ غير معروف"}`
-            ]);
-          }
-        } catch (publishErr: any) {
-          publishStatusMessage = `تنبيه: تم تسجيل معالجة الفيديو ولكن فشل الاتصال بـ Buffer: ${publishErr.message}`;
-          setSyncLogs(prev => [
-            ...prev,
-            `⚠️ فشل الاتصال بـ Buffer: ${publishErr.message}`
-          ]);
-        }
-      }
-
-      // Successfully processed! Add to processed table and logs
-      if (channel.id) {
-        await supabase.from("processed_videos").insert({
-          channel_id: channel.id,
-          video_id: newestVideo.id,
-          video_title: newestVideo.title,
-          published_to_buffer: true,
-        });
-      }
-
-      await supabase.from("automation_logs").insert({
-        channel_name: channel.channel_name,
-        video_title: newestVideo.title,
-        status: "success",
-        message: publishStatusMessage,
-      });
-
-      setSyncLogs(prev => [
-        ...prev,
-        `✓ تم تسجيل المعالجة وتحديث قاعدة البيانات بنجاح.`,
-        `🎉 الأتمتة اكتملت بالكامل!`
-      ]);
+      setSuccessMsg(`بدأت مزامنة ومعالجة قناة "${channel.channel_name}" بنجاح في الخلفية!`);
       
       setTimeout(() => {
         setSyncingIdx(null);
         fetchLogs();
-      }, 3000);
+      }, 3500);
 
     } catch (err: any) {
       console.error("[Sync] Error during automation:", err);
@@ -1145,14 +941,7 @@ export default function ChannelTrackerHub() {
         ...prev,
         `❌ فشل الأتمتة: ${err.message || "حدث خطأ أثناء المعالجة."}`
       ]);
-      
-      await supabase.from("automation_logs").insert({
-        channel_name: channel.channel_name,
-        video_title: "عملية التتبع",
-        status: "error",
-        message: `فشلت الأتمتة للفيديو المكتشف: ${err.message || "خطأ غير معروف"}`,
-      });
-
+      setErrorMsg(err.message || "فشلت المزامنة");
       setTimeout(() => {
         setSyncingIdx(null);
         fetchLogs();
