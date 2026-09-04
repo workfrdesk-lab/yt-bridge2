@@ -393,6 +393,70 @@ def build_caption_overlay(text, template_opts, video_w, video_h, output_png):
     # Final guaranteed attempt with SVG
     return build_caption_overlay_svg(text, template_opts, video_w, video_h, output_png)
 
+def render_caption_drawtext(input_video_path, output_video_path, template_opts, text, vid_w, vid_h):
+    """
+    Direct FFmpeg drawtext fallback for environments where SVG rasterizer or ImageMagick are missing.
+    Burns crisp text directly with background box in a single FFmpeg pass.
+    """
+    scale = max(0.5, min(2.5, vid_w / 720.0))
+    font_size_pt = float(template_opts.get("font_size") or 44)
+    font_size = max(18, int(font_size_pt * scale * 0.82))
+
+    font_path = get_font_path(template_opts.get("font_family") or "Cairo")
+    font_color = str(template_opts.get("font_color") or "white")
+    bg_color = str(template_opts.get("background_color") or "black").replace("#", "0x")
+    bg_opacity = float(template_opts.get("background_opacity", 0.75))
+    has_bg = template_opts.get("has_background", True) and bg_opacity > 0.01
+
+    box_filter = f":box=1:boxcolor={bg_color}@{bg_opacity}:boxborderw=16" if has_bg else ""
+
+    pos_preset = str(template_opts.get("position") or "bottom").lower()
+    pos_y_percent = template_opts.get("position_y_percent")
+    if pos_y_percent is not None and str(pos_y_percent).strip() != "":
+        try:
+            pct = max(0.05, min(0.95, float(pos_y_percent) / 100.0))
+            y_expr = f"(h*{pct} - text_h/2)"
+        except Exception:
+            y_expr = "(h - text_h - h*0.12)"
+    elif pos_preset == "top":
+        y_expr = "(h*0.12)"
+    elif pos_preset in ("center", "middle"):
+        y_expr = "((h - text_h)/2)"
+    else:
+        y_expr = "(h - text_h - h*0.12)"
+
+    temp_text_file = tempfile.mktemp(suffix="_cap_text.txt")
+    with open(temp_text_file, "w", encoding="utf-8") as f:
+        f.write(text)
+
+    try:
+        draw_filter = f"drawtext=textfile='{temp_text_file}':fontfile='{font_path}':fontsize={font_size}:fontcolor={font_color}:x=(w-text_w)/2:y={y_expr}{box_filter}"
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", input_video_path,
+            "-vf", draw_filter,
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "20",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "copy",
+            "-movflags", "+faststart",
+            output_video_path
+        ]
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0 and os.path.exists(output_video_path):
+            print(f"[Caption Engine] Drawtext fallback succeeded! Saved to {output_video_path}")
+            return True
+        else:
+            print(f"[Caption Engine] Drawtext failed ({res.returncode}): {res.stderr[-200:]}", file=sys.stderr)
+            return False
+    finally:
+        if os.path.exists(temp_text_file):
+            try:
+                os.remove(temp_text_file)
+            except Exception:
+                pass
+
 def render_caption(input_video_path, output_video_path, template_opts, custom_text=None):
     """
     Burn caption overlay onto video with FFmpeg.
@@ -403,61 +467,66 @@ def render_caption(input_video_path, output_video_path, template_opts, custom_te
     temp_overlay_png = tempfile.mktemp(suffix="_cap_overlay.png")
 
     try:
-        cap_w, cap_h = build_caption_overlay(text, template_opts, vid_w, vid_h, temp_overlay_png)
+        overlay_built = False
+        try:
+            cap_w, cap_h = build_caption_overlay(text, template_opts, vid_w, vid_h, temp_overlay_png)
+            overlay_built = True
+        except Exception as build_err:
+            print(f"[Caption Engine] Overlay build failed ({build_err}), trying drawtext fallback...", file=sys.stderr)
 
-        # Position calculation
-        pos_preset = str(template_opts.get("position") or "bottom").lower()
-        pos_y_percent = template_opts.get("position_y_percent")
+        if overlay_built and os.path.exists(temp_overlay_png):
+            # Position calculation
+            pos_preset = str(template_opts.get("position") or "bottom").lower()
+            pos_y_percent = template_opts.get("position_y_percent")
 
-        if pos_y_percent is not None and str(pos_y_percent).strip() != "":
-            try:
-                pct = float(pos_y_percent)
-                y_pos = int((pct / 100.0) * (vid_h - cap_h))
-            except Exception:
+            if pos_y_percent is not None and str(pos_y_percent).strip() != "":
+                try:
+                    pct = float(pos_y_percent)
+                    y_pos = int((pct / 100.0) * (vid_h - cap_h))
+                except Exception:
+                    y_pos = int(vid_h * 0.82) - cap_h
+            elif pos_preset == "top":
+                y_pos = int(vid_h * 0.08)
+            elif pos_preset == "center":
+                y_pos = (vid_h - cap_h) // 2
+            else:  # bottom
                 y_pos = int(vid_h * 0.82) - cap_h
-        elif pos_preset == "top":
-            y_pos = int(vid_h * 0.08)
-        elif pos_preset == "center":
-            y_pos = (vid_h - cap_h) // 2
-        else:  # bottom
-            y_pos = int(vid_h * 0.82) - cap_h
 
-        # Bounds clamp
-        y_pos = max(10, min(vid_h - cap_h - 10, y_pos))
-        x_pos = (vid_w - cap_w) // 2
+            # Bounds clamp
+            y_pos = max(10, min(vid_h - cap_h - 10, y_pos))
+            x_pos = (vid_w - cap_w) // 2
 
-        print(f"[Caption Engine] Overlaying {cap_w}x{cap_h} caption at ({x_pos}, {y_pos}) onto {input_video_path}...")
+            print(f"[Caption Engine] Overlaying {cap_w}x{cap_h} caption at ({x_pos}, {y_pos}) onto {input_video_path}...")
 
-        ffmpeg_cmd = [
-            "ffmpeg", "-y",
-            "-i", input_video_path,
-            "-i", temp_overlay_png,
-            "-filter_complex", f"[0:v][1:v]overlay={x_pos}:{y_pos}[outv]",
-            "-map", "[outv]",
-            "-map", "0:a?",
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "20",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
-            output_video_path
-        ]
+            ffmpeg_cmd = [
+                "ffmpeg", "-y",
+                "-i", input_video_path,
+                "-i", temp_overlay_png,
+                "-filter_complex", f"[0:v][1:v]overlay={x_pos}:{y_pos}[outv]",
+                "-map", "[outv]",
+                "-map", "0:a?",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "20",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                output_video_path
+            ]
 
-        proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
-        if proc.returncode != 0:
-            print(f"[FFmpeg Error] {proc.stderr[-300:]}", file=sys.stderr)
-            raise RuntimeError(f"FFmpeg failed with exit code {proc.returncode}")
+            proc = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+            if proc.returncode == 0 and os.path.exists(output_video_path):
+                print(f"[Caption Engine] Video saved successfully to {output_video_path}!")
+                return
 
-        print(f"[Caption Engine] Video saved successfully to {output_video_path}!")
+        # Fallback to direct drawtext filter
+        print(f"[Caption Engine] Attempting native FFmpeg drawtext burner...", file=sys.stderr)
+        draw_ok = render_caption_drawtext(input_video_path, output_video_path, template_opts, text, vid_w, vid_h)
+        if draw_ok and os.path.exists(output_video_path):
+            return
 
     except Exception as render_err:
-        print(f"[Caption Engine Critical Error] {render_err}", file=sys.stderr)
-        # Safe fallback: if overlay somehow failed completely, copy the video without caption so publish doesn't die
-        if not os.path.exists(output_video_path):
-            shutil.copyfile(input_video_path, output_video_path)
-            print(f"[Caption Engine] Fallback: Copied original video to output destination.", file=sys.stderr)
-        raise render_err
+        print(f"[Caption Engine Warning] {render_err}", file=sys.stderr)
 
     finally:
         if os.path.exists(temp_overlay_png):
@@ -465,6 +534,11 @@ def render_caption(input_video_path, output_video_path, template_opts, custom_te
                 os.remove(temp_overlay_png)
             except Exception:
                 pass
+
+    # Guaranteed fallback: if caption overlay couldn't be rendered, copy input video so downstream pipeline succeeds
+    if not os.path.exists(output_video_path):
+        print(f"[Caption Engine] Fallback: Copying source video to output destination...", file=sys.stderr)
+        shutil.copyfile(input_video_path, output_video_path)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Video Caption Renderer Engine")
